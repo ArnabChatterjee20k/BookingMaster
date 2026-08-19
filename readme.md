@@ -11,7 +11,6 @@
 id -> primary , int, auto increment
 uid -> uuid -> in case of required to share profile
 email -> unique
-roles -> admin/user
 
 ## Organisation
 id -> primary , int, auto increment
@@ -27,22 +26,19 @@ user_id
 role
 unique(org_id , user_id)
 
-## Performers
-id
-uid
-name
-
 ## Venues
 id
 uid
+name
 location -> [coords] -> spatial points -> spatial indexing
 
 ## Events
 id
 uid
 name
-performer_uid
-venue_uid
+org_id,
+performer_id -> user_id only
+venue_id
 starts_at -> utc
 ends_at -> utc
 
@@ -60,6 +56,7 @@ id
 uid -> idempotent key
 amount
 status
+event_id
 created_at
 expires_at
 

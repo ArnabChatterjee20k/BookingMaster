@@ -1,6 +1,2 @@
-def main():
-    print("Hello from eventmaster!")
-
-
-if __name__ == "__main__":
-    main()
+from src import create_api
+api = create_api()
