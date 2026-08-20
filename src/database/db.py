@@ -1,9 +1,20 @@
 import asyncpg
+from fastapi import Depends
+from typing import Annotated
 from ..config import Config
 
 async def get_db():
     conn: asyncpg.Connection = await asyncpg.connect(Config.db_uri)
     return conn
+
+async def get_db_session():
+    conn: asyncpg.Connection = await asyncpg.connect(Config.db_uri)
+    try:
+        yield conn
+    finally:
+        await conn.close()
+
+DBSession = Annotated[asyncpg.Connection, Depends(get_db_session)]
 
 async def load_schemas():
     conn = await get_db()
@@ -17,7 +28,9 @@ async def load_schemas():
             uid uuid unique not null,
             created_at timestamptz default now(),
             updated_at timestamptz default now(),
-            email varchar(255) unique
+            email varchar(255) unique,
+            name varchar(64) not null,
+            password varchar(64) not null
         )
     """)
 

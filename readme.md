@@ -11,6 +11,7 @@
 id -> primary , int, auto increment
 uid -> uuid -> in case of required to share profile
 email -> unique
+password -> currently storing as normal value only
 
 ## Organisation
 id -> primary , int, auto increment
