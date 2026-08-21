@@ -1,13 +1,14 @@
-from fastapi import APIRouter, HTTPException, Response, Cookie
-from typing import Annotated
-from fastapi import status
-from pydantic import BaseModel
 from uuid import uuid4
+
+from asyncpg import Record
+from fastapi import APIRouter, HTTPException, Response, status
+from pydantic import BaseModel
+
+from ..auth.auth import get_token
+from ..auth.deps import CurrentUser
 from ..config import Config
 from ..database.db import DBSession
 from ..database.models import Base
-from ..auth.auth import get_token, check_token
-from asyncpg import Record
 
 router = APIRouter()
 
@@ -22,18 +23,16 @@ class UserResponse(Base):
 
 @router.post("/users", response_model=UserResponse)
 async def create_user(user: CreateUserRequest, db: DBSession, response: Response):
-    existing_user: Record = await db.fetchrow("select from users where email=$1", user.email)
+    existing_user: Record = await db.fetchrow("select 1 from users where email=$1", user.email)
     if existing_user:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "user already exists")
-    row: Record = await db.fetchrow("insert into users(uid, email, name, password) values ($1,$2,$3,$4)", uuid4(), user.email, user.name, user.password)
+    row: Record = await db.fetchrow(
+        "insert into users(uid, email, name, password) values ($1,$2,$3,$4) returning *",
+        uuid4(), user.email, user.name, user.password,
+    )
     response.set_cookie(Config.auth_cookie_name, get_token(row.get("uid")))
-    return UserResponse(**row)
+    return UserResponse(**dict(row))
 
-# TODO: we will need this in the middleware layer as well user will be requried through out the request response lifecycle
-@router.get("/users", response_model=UserResponse)
-async def get_user(db: DBSession, token:Annotated[str | None, Cookie(alias=Config.auth_cookie_name)]):
-    existing_user: Record = await db.fetchrow("select from users where uid=$1", user.email)
-    if existing_user:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "user already exists")
-    row: Record = await db.fetchrow("insert into users(uid, email, name, password) values ($1,$2,$3,$4)", uuid4(), user.email, user.name, user.password)
-    return UserResponse(**row)
+@router.get("/users/me", response_model=UserResponse)
+async def get_me(user: CurrentUser):
+    return user
