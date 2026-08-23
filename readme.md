@@ -22,10 +22,10 @@ created_at
 ## Membership
 id
 uid
-org_id
-user_id
+org_uid
+user_uid
 role
-unique(org_id , user_id)
+unique(org_uid , user_uid)
 
 ## Venues
 id

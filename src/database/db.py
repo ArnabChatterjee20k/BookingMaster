@@ -52,10 +52,10 @@ async def load_schemas():
             uid uuid unique not null,
             created_at timestamptz default now(),
             updated_at timestamptz default now(),
-            org_id integer not null,
-            user_id integer not null,
+            org_uid uuid not null,
+            user_uid uuid not null,
             role varchar(16) not null,
-            unique(org_id, user_id)
+            unique(org_uid, user_uid)
         )
     """)
 
