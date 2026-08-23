@@ -59,10 +59,8 @@ async def load_schemas():
         )
     """)
 
-    # unique(org_uid, user_uid) is org-leading, so it cannot serve a lookup by
-    # user alone -- that is what listing a user's organisations filters on.
     await conn.execute(
-        "create index if not exists memberships_user_uid_idx on memberships(user_uid)"
+        "create index if not exists memberships_user_uid_id_idx     on memberships(user_uid, id);"
     )
 
     # venues
