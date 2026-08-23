@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from .database.db import load_schemas
+from .database.errors import install_error_handlers
 from .routes.users import router as users_router
 from .routes.organisations import router as orginisations_router
 
@@ -14,6 +15,7 @@ def create_api():
         yield
 
     app = FastAPI(lifespan=lifecycle)
+    install_error_handlers(app)
 
     @app.get("/health")
     def health():
