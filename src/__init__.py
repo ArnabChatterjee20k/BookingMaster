@@ -22,8 +22,8 @@ def create_api():
     def health():
         return "ok"
 
-    app.include_router(users_router)
-    app.include_router(orginisations_router)
-    app.include_router(venues_router)
+    app.include_router(users_router, tags=["users"])
+    app.include_router(orginisations_router, tags=["organisations"])
+    app.include_router(venues_router, tags=["venues"])
 
     return app
