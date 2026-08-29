@@ -19,7 +19,11 @@ logger = logging.getLogger(__name__)
 # them all and this table only decides which status each deserves.
 _RULES: list[tuple[type[Exception], int, str]] = [
     (pg.UniqueViolationError, status.HTTP_409_CONFLICT, "resource already exists"),
-    (pg.ForeignKeyViolationError, status.HTTP_409_CONFLICT, "referenced resource does not exist"),
+    (
+        pg.ForeignKeyViolationError,
+        status.HTTP_409_CONFLICT,
+        "referenced resource does not exist",
+    ),
     (pg.NotNullViolationError, status.HTTP_400_BAD_REQUEST, "missing required field"),
     (pg.CheckViolationError, status.HTTP_400_BAD_REQUEST, "invalid value"),
     (pg.DataError, status.HTTP_400_BAD_REQUEST, "malformed value"),

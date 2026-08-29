@@ -2,6 +2,7 @@ import jwt
 from datetime import datetime, timedelta
 from ..config import Config
 
+
 def get_token(user_id):
     expiry = datetime.now() + timedelta(days=30)
     return jwt.encode(
@@ -9,6 +10,7 @@ def get_token(user_id):
         Config.jwt_secret,
         algorithm="HS256",
     )
+
 
 def check_token(encoded_jwt) -> str:
     if not encoded_jwt:

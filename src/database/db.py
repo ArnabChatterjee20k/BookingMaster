@@ -3,9 +3,11 @@ from fastapi import Depends
 from typing import Annotated
 from ..config import Config
 
+
 async def get_db():
     conn: asyncpg.Connection = await asyncpg.connect(Config.db_uri)
     return conn
+
 
 async def get_db_session():
     conn: asyncpg.Connection = await asyncpg.connect(Config.db_uri)
@@ -14,7 +16,9 @@ async def get_db_session():
     finally:
         await conn.close()
 
+
 DBSession = Annotated[asyncpg.Connection, Depends(get_db_session)]
+
 
 async def load_schemas():
     conn = await get_db()

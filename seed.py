@@ -46,8 +46,12 @@ async def seed(args):
     # ---------------------------------------------------------------- users
     user_uids = [uuid.uuid4() for _ in range(args.users)]
     users = [
-        (user_uids[i], PROBE_EMAIL if i == 0 else f"user{i}@seed.local",
-         "probe" if i == 0 else f"user{i}", PASSWORD)
+        (
+            user_uids[i],
+            PROBE_EMAIL if i == 0 else f"user{i}@seed.local",
+            "probe" if i == 0 else f"user{i}",
+            PASSWORD,
+        )
         for i in range(args.users)
     ]
     await conn.copy_records_to_table(
@@ -58,7 +62,9 @@ async def seed(args):
     # -------------------------------------------------------- organisations
     org_uids = [uuid.uuid4() for _ in range(args.orgs)]
     orgs = [(org_uids[i], f"org-{i}") for i in range(args.orgs)]
-    await conn.copy_records_to_table("organisations", records=orgs, columns=["uid", "name"])
+    await conn.copy_records_to_table(
+        "organisations", records=orgs, columns=["uid", "name"]
+    )
     print(f"organisations  {len(orgs):>8}")
 
     # ----------------------------------------------------------- memberships
@@ -74,10 +80,10 @@ async def seed(args):
         rows.append((uuid.uuid4(), org_uids[org_i], user_uids[user_i], role))
         return True
 
-    for org_i in range(args.orgs):                      # one owner per org
+    for org_i in range(args.orgs):  # one owner per org
         add(org_i, rng.randrange(args.users), "owner")
 
-    probe_target = min(args.probe_orgs, args.orgs)      # a user worth paginating
+    probe_target = min(args.probe_orgs, args.orgs)  # a user worth paginating
     placed, org_i = 0, 0
     while placed < probe_target and org_i < args.orgs:
         if add(org_i, 0, "member"):
@@ -92,7 +98,9 @@ async def seed(args):
     await conn.copy_records_to_table(
         "memberships", records=rows, columns=["uid", "org_uid", "user_uid", "role"]
     )
-    print(f"memberships    {len(rows):>8}  ({args.orgs} owner, {len(rows) - args.orgs} member)")
+    print(
+        f"memberships    {len(rows):>8}  ({args.orgs} owner, {len(rows) - args.orgs} member)"
+    )
 
     await conn.execute("analyze users; analyze organisations; analyze memberships")
 
@@ -111,14 +119,23 @@ async def seed(args):
 
 
 def main():
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("--users", type=int, default=10_000)
     p.add_argument("--orgs", type=int, default=10_000)
-    p.add_argument("--extra-members", type=int, default=10_000,
-                   help="member rows on top of the one owner per org")
-    p.add_argument("--probe-orgs", type=int, default=200,
-                   help="how many orgs probe@seed.local belongs to")
+    p.add_argument(
+        "--extra-members",
+        type=int,
+        default=10_000,
+        help="member rows on top of the one owner per org",
+    )
+    p.add_argument(
+        "--probe-orgs",
+        type=int,
+        default=200,
+        help="how many orgs probe@seed.local belongs to",
+    )
     p.add_argument("--keep", action="store_true", help="append instead of truncating")
     p.add_argument("--seed", type=int, default=0, help="rng seed, for repeatable data")
     asyncio.run(seed(p.parse_args()))

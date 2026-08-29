@@ -14,6 +14,7 @@ _EWKT_POINT = re.compile(
     re.IGNORECASE,
 )
 
+
 class Point(BaseModel):
     longitude: float = Field(ge=-180, le=180)
     latitude: float = Field(ge=-90, le=90)
@@ -41,9 +42,11 @@ class Base(BaseModel):
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
+
 class User(Base):
     email: str
     name: str
+
 
 class MemberRole(StrEnum):
     OWNER = "owner"
