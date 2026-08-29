@@ -6,6 +6,7 @@ from pydantic import BaseModel
 
 from ..auth.deps import CurrentUser
 from ..database.db import DBSession
+from ..database.utils import get_role
 from ..database.models import Base, Point, MemberRole
 
 router = APIRouter()
@@ -31,18 +32,9 @@ VENUE_COLUMNS = (
 )
 
 
-async def _get_role(db: DBSession, org_uid: UUID, user_uid: UUID) -> str | None:
-    row: Record = await db.fetchrow(
-        "select role from memberships where org_uid=$1 and user_uid=$2",
-        org_uid,
-        user_uid,
-    )
-    return row.get("role") if row else None
-
-
 @router.post("/venues", response_model=VenueResponse)
 async def create_venue(venue: VenueCreateRequest, db: DBSession, user: CurrentUser):
-    if await _get_role(db, venue.org_uid, user.uid) != MemberRole.OWNER:
+    if await get_role(db, venue.org_uid, user.uid) != MemberRole.OWNER:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, "Not a owner. Owner can only remove members"
         )

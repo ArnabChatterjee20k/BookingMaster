@@ -6,6 +6,7 @@ from pydantic import BaseModel
 
 from ..auth.deps import CurrentUser
 from ..database.db import DBSession
+from ..database.utils import get_role
 from ..database.models import Base, MemberRole
 
 router = APIRouter()
@@ -41,15 +42,6 @@ class UpdateMemberRequest(BaseModel):
 
 class MembersResposne(BaseModel):
     members: list[MemberResponse]
-
-
-async def _get_role(db: DBSession, org_uid: UUID, user_uid: UUID) -> str | None:
-    row: Record = await db.fetchrow(
-        "select role from memberships where org_uid=$1 and user_uid=$2",
-        org_uid,
-        user_uid,
-    )
-    return row.get("role") if row else None
 
 
 @router.post("/organisations", response_model=OrganisationResponse)
@@ -116,7 +108,7 @@ async def get_orginisation(uid: UUID, db: DBSession, user: CurrentUser):
 
 @router.delete("/organisations/{uid}")
 async def delete_orginisation(uid: UUID, db: DBSession, user: CurrentUser):
-    if await _get_role(db, uid, user.uid) != MemberRole.OWNER:
+    if await get_role(db, uid, user.uid) != MemberRole.OWNER:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, "Not a owner. Owner can only delete org"
         )
@@ -131,7 +123,7 @@ async def delete_orginisation(uid: UUID, db: DBSession, user: CurrentUser):
 async def create_members(
     uid: UUID, db: DBSession, members: CreateMembersRequest, user: CurrentUser
 ):
-    if await _get_role(db, uid, user.uid) != MemberRole.OWNER:
+    if await get_role(db, uid, user.uid) != MemberRole.OWNER:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, "Not a owner. Owner can only add members"
         )
@@ -144,7 +136,7 @@ async def create_members(
 
 @router.get("/organisations/{uid}/members", response_model=MembersResposne)
 async def list_members(uid: UUID, db: DBSession, user: CurrentUser):
-    if await _get_role(db, uid, user.uid) is None:
+    if await get_role(db, uid, user.uid) is None:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Not a member")
     rows: list[Record] = await db.fetch(
         "select user_uid, role from memberships where org_uid=$1", uid
@@ -154,7 +146,7 @@ async def list_members(uid: UUID, db: DBSession, user: CurrentUser):
 
 @router.delete("/organisations/{uid}/members/{member_uid}")
 async def delete_member(uid: UUID, member_uid: UUID, db: DBSession, user: CurrentUser):
-    if await _get_role(db, uid, user.uid) != MemberRole.OWNER:
+    if await get_role(db, uid, user.uid) != MemberRole.OWNER:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, "Not a owner. Owner can only remove members"
         )
@@ -176,7 +168,7 @@ async def update_member_role(
     user: CurrentUser,
     member: UpdateMemberRequest,
 ):
-    if await _get_role(db, uid, user.uid) != MemberRole.OWNER:
+    if await get_role(db, uid, user.uid) != MemberRole.OWNER:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, "Not a owner. Owner can only remove members"
         )
