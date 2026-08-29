@@ -39,8 +39,8 @@ location -> [coords] -> spatial points -> spatial indexing
 id
 uid
 name
-org_id,
-performer_id -> user_id only
+org_uid,
+performer_uid -> user_uid only
 venue_id
 starts_at -> utc
 ends_at -> utc

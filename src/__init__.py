@@ -7,6 +7,7 @@ from .database.errors import install_error_handlers
 from .routes.users import router as users_router
 from .routes.organisations import router as orginisations_router
 from .routes.venues import router as venues_router
+from .routes.events import router as events_router
 
 
 def create_api():
@@ -25,5 +26,6 @@ def create_api():
     app.include_router(users_router, tags=["users"])
     app.include_router(orginisations_router, tags=["organisations"])
     app.include_router(venues_router, tags=["venues"])
+    app.include_router(events_router, tags=["events"])
 
     return app

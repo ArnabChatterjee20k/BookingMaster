@@ -90,7 +90,7 @@ async def load_schemas():
             created_at timestamptz default now(),
             updated_at timestamptz default now(),
             name varchar(64) not null,
-            org_id integer not null,
+            org_uid uuid not null,
             performer_uid uuid not null,
             venue_uid uuid not null,
             starts_at timestamptz not null,
@@ -106,7 +106,7 @@ async def load_schemas():
             created_at timestamptz default now(),
             updated_at timestamptz default now(),
             name varchar(64) not null,
-            event_id integer not null,
+            event_uid uuid not null,
             price numeric(12, 2) default 0.00,
             available integer not null
         )
@@ -121,7 +121,7 @@ async def load_schemas():
             updated_at timestamptz default now(),
             amount numeric(12, 2) default 0.00,
             status varchar(16) not null,
-            event_id integer not null,
+            event_uid uuid not null,
             expires_at timestamptz not null
         )
     """)
@@ -133,9 +133,9 @@ async def load_schemas():
             uid uuid unique not null,
             created_at timestamptz default now(),
             updated_at timestamptz default now(),
-            event_id integer not null,
-            booking_id integer not null,
-            ticket_tier_id integer not null,
+            event_uid uuid not null,
+            booking_uid uuid not null,
+            ticket_tier_uid uuid not null,
             status varchar(16) not null
         )
     """)

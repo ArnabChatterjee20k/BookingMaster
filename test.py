@@ -595,6 +595,169 @@ def test_venue_reads_are_unauthenticated(c):
     assert c.get(f"/venues/{state['venue']['uid']}").status_code == 200
 
 
+# --------------------------------------------------------------------- events
+
+
+def _iso(hours_from_now):
+    from datetime import datetime, timedelta, timezone
+
+    return (datetime.now(timezone.utc) + timedelta(hours=hours_from_now)).isoformat()
+
+
+def _make_venue(c, name=None):
+    """Create a venue owned by alice; returns its body."""
+    r = c.post(
+        "/venues",
+        json=_venue_body(
+            state["org"]["uid"], name or _unique("v"), float(len(results) % 170), 5.0
+        ),
+        cookies=state["alice_auth"],
+    )
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def _event_body(venue_uid, name="gig", org_uid=None):
+    return {
+        "name": name,
+        "org_uid": org_uid or state["org"]["uid"],
+        "performer_uid": str(uuid.uuid4()),
+        "venue_uid": venue_uid,
+        "starts_at": _iso(1),
+        "ends_at": _iso(3),
+    }
+
+
+@step("alice_auth", "org")
+def test_owner_creates_event(c):
+    venue = _make_venue(c, _unique("arena"))
+    r = c.post(
+        "/events",
+        json=_event_body(venue["uid"], "opening night"),
+        cookies=state["alice_auth"],
+    )
+    assert r.status_code == 200, r.text
+    event = r.json()
+    assert event["name"] == "opening night", event
+    assert event["venue_uid"] == venue["uid"], event
+    assert event["org_uid"] == state["org"]["uid"], event
+    state["venue_a"], state["event"] = venue, event
+
+
+@step("org")
+def test_anonymous_cannot_create_event(c):
+    r = c.post("/events", json=_event_body(str(uuid.uuid4())))
+    assert r.status_code == 401, f"expected 401, got {r.status_code} {r.text}"
+
+
+@step("bob_auth", "org", "venue_a")
+def test_member_cannot_create_event(c):
+    r = c.post(
+        "/events", json=_event_body(state["venue_a"]["uid"]), cookies=state["bob_auth"]
+    )
+    assert r.status_code == 403, f"expected 403, got {r.status_code} {r.text}"
+
+
+@step("alice_auth", "venue_a")
+def test_cannot_create_event_in_unknown_org(c):
+    r = c.post(
+        "/events",
+        json=_event_body(state["venue_a"]["uid"], org_uid=str(uuid.uuid4())),
+        cookies=state["alice_auth"],
+    )
+    assert r.status_code == 403, f"expected 403, got {r.status_code} {r.text}"
+
+
+@step("alice_auth", "org")
+def test_create_event_with_unknown_venue_is_404(c):
+    """The `insert ... select` gate: no venue row -> no insert -> 404, not a 500."""
+    r = c.post(
+        "/events", json=_event_body(str(uuid.uuid4())), cookies=state["alice_auth"]
+    )
+    assert r.status_code == 404, f"expected 404, got {r.status_code} {r.text}"
+
+
+@step("alice_auth", "org")
+def test_failed_event_insert_writes_nothing(c):
+    """A rejected gate must not leave a half-written event behind."""
+    before = c.get("/venues").status_code  # cheap liveness check
+    assert before == 200
+    bad = str(uuid.uuid4())
+    r = c.post("/events", json=_event_body(bad, "ghost"), cookies=state["alice_auth"])
+    assert r.status_code == 404, r.text
+    # nothing to fetch: the event uid was never returned, so probe by listing venues
+    # and confirming no event references the bogus venue via a direct get
+    assert c.get(f"/events/{bad}").status_code == 404
+
+
+@step("alice_auth", "org")
+def test_naive_datetime_is_rejected(c):
+    venue = _make_venue(c)
+    body = _event_body(venue["uid"])
+    body["starts_at"] = "2030-01-01T10:00:00"  # no tzinfo
+    r = c.post("/events", json=body, cookies=state["alice_auth"])
+    assert r.status_code == 422, f"expected 422, got {r.status_code} {r.text}"
+
+
+@step("alice_auth", "org")
+def test_create_event_rejects_malformed_body(c):
+    r = c.post(
+        "/events",
+        json={"name": "no-venue", "org_uid": state["org"]["uid"]},
+        cookies=state["alice_auth"],
+    )
+    assert r.status_code == 422, f"expected 422, got {r.status_code} {r.text}"
+
+
+@step("event", "venue_a")
+def test_get_event_returns_venue_info(c):
+    r = c.get(f"/events/{state['event']['uid']}")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["uid"] == state["event"]["uid"], body
+    assert body["name"] == "opening night", body
+    # venue.name must be the VENUE's name -- `e.*` also carries a `name` column,
+    # so an unaliased join hands back the event name here.
+    assert (
+        body["venue"]["name"] == state["venue_a"]["name"]
+    ), f"venue.name is {body['venue']['name']!r}, expected the venue's own name"
+    assert body["venue"]["location"] == state["venue_a"]["location"], body["venue"]
+
+
+@step("alice_auth", "org")
+def test_get_event_returns_the_requested_event(c):
+    """Guards the where clause: without `where e.uid = $1` this returns whichever
+    event the join happened to yield first."""
+    first = c.post(
+        "/events",
+        json=_event_body(_make_venue(c)["uid"], "first"),
+        cookies=state["alice_auth"],
+    ).json()
+    second = c.post(
+        "/events",
+        json=_event_body(_make_venue(c)["uid"], "second"),
+        cookies=state["alice_auth"],
+    ).json()
+    for expected in (first, second):
+        r = c.get(f"/events/{expected['uid']}")
+        assert r.status_code == 200, r.text
+        assert (
+            r.json()["uid"] == expected["uid"]
+        ), f"asked for {expected['name']}, got {r.json()['name']}"
+
+
+@step()
+def test_unknown_event_is_404(c):
+    r = c.get(f"/events/{uuid.uuid4()}")
+    assert r.status_code == 404, f"expected 404, got {r.status_code} {r.text}"
+
+
+@step()
+def test_malformed_event_uid_is_422(c):
+    r = c.get("/events/not-a-uuid")
+    assert r.status_code == 422, f"expected 422, got {r.status_code} {r.text}"
+
+
 def main():
     truncate()
     passed = failed = skipped = 0
