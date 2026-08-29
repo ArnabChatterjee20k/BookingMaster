@@ -303,6 +303,190 @@ def test_non_owner_cannot_delete_organisation(c):
     assert r.status_code == 403, f"expected 403, got {r.status_code} {r.text}"
 
 
+# --------------------------------------------------------------------- venues
+
+def _venue_body(org_uid, name, longitude=77.5946, latitude=12.9716):
+    return {"org_uid": org_uid, "name": name,
+            "location": {"longitude": longitude, "latitude": latitude}}
+
+
+def _unique(prefix):
+    """unique(name, location) is global, so every test needs its own name."""
+    return f"{prefix}-{uuid.uuid4().hex[:8]}"
+
+
+@step("alice_auth", "org")
+def test_owner_creates_venue(c):
+    name = _unique("hall")
+    r = c.post("/venues", json=_venue_body(state["org"]["uid"], name), cookies=state["alice_auth"])
+    assert r.status_code == 200, r.text
+    venue = r.json()
+    assert venue["name"] == name, venue
+    # the whole point of ST_AsText in VENUE_COLUMNS: a parsed point, not WKB hex
+    assert venue["location"] == {"longitude": 77.5946, "latitude": 12.9716}, venue
+    assert "uid" in venue, venue
+    state["venue"] = venue
+
+
+@step("org")
+def test_anonymous_cannot_create_venue(c):
+    r = c.post("/venues", json=_venue_body(state["org"]["uid"], _unique("anon")))
+    assert r.status_code == 401, f"expected 401, got {r.status_code} {r.text}"
+
+
+@step("bob_auth", "org")
+def test_member_cannot_create_venue(c):
+    """bob is a member of state['org'], not an owner."""
+    r = c.post("/venues", json=_venue_body(state["org"]["uid"], _unique("member")),
+               cookies=state["bob_auth"])
+    assert r.status_code == 403, f"expected 403, got {r.status_code} {r.text}"
+
+
+@step("alice_auth")
+def test_cannot_create_venue_in_unknown_org(c):
+    """No membership row at all -- must not fall through to the insert."""
+    r = c.post("/venues", json=_venue_body(str(uuid.uuid4()), _unique("ghost")),
+               cookies=state["alice_auth"])
+    assert r.status_code == 403, f"expected 403, got {r.status_code} {r.text}"
+
+
+@step("alice_auth", "org")
+def test_duplicate_name_and_location_is_409(c):
+    body = _venue_body(state["org"]["uid"], _unique("twin"))
+    first = c.post("/venues", json=body, cookies=state["alice_auth"])
+    assert first.status_code == 200, first.text
+    second = c.post("/venues", json=body, cookies=state["alice_auth"])
+    assert second.status_code == 409, \
+        f"unique(name, location) should surface as 409, got {second.status_code} {second.text}"
+    # the handler must not echo asyncpg's message (it carries the constraint and the WKB)
+    assert "venues_name_location_key" not in second.text, second.text
+
+
+@step("alice_auth", "org")
+def test_same_name_different_location_allowed(c):
+    name = _unique("twosites")
+    a = c.post("/venues", json=_venue_body(state["org"]["uid"], name, 10.0, 10.0),
+               cookies=state["alice_auth"])
+    b = c.post("/venues", json=_venue_body(state["org"]["uid"], name, 20.0, 20.0),
+               cookies=state["alice_auth"])
+    assert a.status_code == 200, a.text
+    assert b.status_code == 200, f"same name at a different point is a different venue: {b.text}"
+    assert a.json()["uid"] != b.json()["uid"]
+
+
+@step("alice_auth", "org")
+def test_same_location_different_name_allowed(c):
+    point = (30.0, 30.0)
+    a = c.post("/venues", json=_venue_body(state["org"]["uid"], _unique("stadium"), *point),
+               cookies=state["alice_auth"])
+    b = c.post("/venues", json=_venue_body(state["org"]["uid"], _unique("annex"), *point),
+               cookies=state["alice_auth"])
+    assert a.status_code == 200, a.text
+    assert b.status_code == 200, f"same point under another name is allowed: {b.text}"
+
+
+@step("alice_auth", "org")
+def test_point_precision_still_conflicts(c):
+    """POINT(1.5 1.5) and POINT(1.50 1.50) are the same float8 pair."""
+    name = _unique("precise")
+    a = c.post("/venues", json=_venue_body(state["org"]["uid"], name, 1.5, 1.5),
+               cookies=state["alice_auth"])
+    assert a.status_code == 200, a.text
+    b = c.post("/venues", json=_venue_body(state["org"]["uid"], name, 1.50, 1.50),
+               cookies=state["alice_auth"])
+    assert b.status_code == 409, f"expected 409, got {b.status_code} {b.text}"
+
+
+@step("alice_auth", "org")
+def test_out_of_range_coordinates_are_422(c):
+    for lon, lat in [(181.0, 0.0), (-181.0, 0.0), (0.0, 91.0), (0.0, -91.0)]:
+        r = c.post("/venues", json=_venue_body(state["org"]["uid"], _unique("bad"), lon, lat),
+                   cookies=state["alice_auth"])
+        assert r.status_code == 422, f"({lon}, {lat}) should be rejected, got {r.status_code}"
+
+
+@step("alice_auth", "org")
+def test_create_venue_rejects_malformed_body(c):
+    r = c.post("/venues", json={"org_uid": state["org"]["uid"], "name": "no-location"},
+               cookies=state["alice_auth"])
+    assert r.status_code == 422, f"expected 422, got {r.status_code} {r.text}"
+
+
+@step("venue")
+def test_get_venue_by_uid(c):
+    r = c.get(f"/venues/{state['venue']['uid']}")
+    assert r.status_code == 200, r.text
+    assert r.json()["uid"] == state["venue"]["uid"], r.json()
+    assert r.json()["location"] == state["venue"]["location"], r.json()
+
+
+@step()
+def test_unknown_venue_is_404(c):
+    r = c.get(f"/venues/{uuid.uuid4()}")
+    assert r.status_code == 404, f"expected 404, got {r.status_code} {r.text}"
+
+
+@step()
+def test_malformed_venue_uid_is_422(c):
+    r = c.get("/venues/not-a-uuid")
+    assert r.status_code == 422, f"expected 422, got {r.status_code} {r.text}"
+
+
+@step("venue")
+def test_list_venues_returns_parsed_points(c):
+    r = c.get("/venues")
+    assert r.status_code == 200, r.text
+    venues = r.json()["venues"]
+    assert venues, "expected at least the venue created earlier"
+    for v in venues:
+        assert set(v["location"]) == {"longitude", "latitude"}, v
+        assert isinstance(v["location"]["longitude"], float), v
+
+
+@step()
+def test_venue_limit_bounds_are_enforced(c):
+    assert c.get("/venues", params={"limit": 0}).status_code == 422
+    assert c.get("/venues", params={"limit": 101}).status_code == 422
+    assert c.get("/venues", params={"limit": 1}).status_code == 200
+    assert c.get("/venues", params={"limit": 100}).status_code == 200
+
+
+@step("alice_auth", "org")
+def test_venue_pagination_covers_every_row_exactly_once(c):
+    """Walk the keyset cursor to the end; every venue appears exactly once."""
+    mine = set()
+    for i in range(5):
+        r = c.post("/venues", json=_venue_body(state["org"]["uid"], _unique(f"page-{i}"),
+                                               100.0 + i, 40.0),
+                   cookies=state["alice_auth"])
+        assert r.status_code == 200, r.text
+        mine.add(r.json()["uid"])
+
+    seen, after, pages = [], 0, 0
+    while True:
+        r = c.get("/venues", params={"after": after, "limit": 2})
+        assert r.status_code == 200, r.text
+        batch = r.json()["venues"]
+        seen.extend(v["uid"] for v in batch)
+        pages += 1
+        assert pages < 100, "cursor never terminated -- pagination is looping"
+        if len(batch) < 2:
+            break
+        after = batch[-1]["id"]
+
+    assert len(seen) == len(set(seen)), "duplicate rows across pages"
+    assert mine <= set(seen), f"pagination skipped {len(mine - set(seen))} venues"
+
+
+@step("venue")
+def test_venue_reads_are_unauthenticated(c):
+    """Pins current behaviour: /venues and /venues/{uid} take no CurrentUser, so
+    anyone can read every venue in the database regardless of membership. Flip
+    both assertions to 401 if venues become org-scoped."""
+    assert c.get("/venues").status_code == 200
+    assert c.get(f"/venues/{state['venue']['uid']}").status_code == 200
+
+
 def main():
     truncate()
     passed = failed = skipped = 0

@@ -60,7 +60,7 @@ async def load_schemas():
     """)
 
     await conn.execute(
-        "create index if not exists memberships_user_uid_id_idx     on memberships(user_uid, id);"
+        "create index if not exists memberships_user_uid_id_idx on memberships(user_uid, id);"
     )
 
     # venues
@@ -70,8 +70,11 @@ async def load_schemas():
             uid uuid unique not null,
             created_at timestamptz default now(),
             updated_at timestamptz default now(),
+            creator_user_uid uuid not null,
+            org_uid uuid not null,
             name varchar(64) not null,
-            location geography(point, 4326) not null
+            location geography(point, 4326) not null,
+            unique(name, location)
         )
     """)
 

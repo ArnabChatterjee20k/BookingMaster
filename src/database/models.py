@@ -2,6 +2,7 @@ import re
 from datetime import datetime
 from typing import Any
 from uuid import UUID
+from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
 
@@ -43,3 +44,7 @@ class Base(BaseModel):
 class User(Base):
     email: str
     name: str
+
+class MemberRole(StrEnum):
+    OWNER = "owner"
+    MEMBER = "member"

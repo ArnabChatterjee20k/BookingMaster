@@ -31,6 +31,8 @@ unique(org_uid , user_uid)
 id
 uid
 name
+creator_user_uid
+org_uid
 location -> [coords] -> spatial points -> spatial indexing
 
 ## Events

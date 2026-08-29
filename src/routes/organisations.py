@@ -1,5 +1,4 @@
 from uuid import UUID, uuid4
-from enum import StrEnum
 from asyncpg import Record
 from fastapi import APIRouter, HTTPException, Query, status, Response
 from typing import Annotated
@@ -7,13 +6,9 @@ from pydantic import BaseModel
 
 from ..auth.deps import CurrentUser
 from ..database.db import DBSession
-from ..database.models import Base
+from ..database.models import Base, MemberRole
 
 router = APIRouter()
-
-class MemberRole(StrEnum):
-    OWNER = "owner"
-    MEMBER = "member"
 
 class CreateOrgnaisationRequest(BaseModel):
     name: str
