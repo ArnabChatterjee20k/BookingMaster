@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, model_validator
 from ..auth.deps import CurrentUser
 from ..database.db import DBSession
 from ..database.models import Base, Point, MemberRole
+from ..database.query import QueryBuilder
 from ..database.utils import get_role
 
 router = APIRouter()
@@ -51,12 +52,18 @@ class EventCreateRequest(BaseModel):
 
 
 class EventListRequest(BaseModel):
-    search: str = ""
     after: int = 0
     limit: int = Field(10, ge=1, le=100)
-    location: Point | None = None
+    longitude: float | None = Field(None, ge=-180, le=180)
+    latitude: float | None = Field(None, ge=-90, le=90)
     # in km
-    radius: int = Field(1, ge=1, le=100)
+    radius: int = Field(1, ge=1, le=100, description="Radius in km")
+
+    @model_validator(mode="after")
+    def coords_come_in_pairs(self) -> Self:
+        if (self.longitude is None) != (self.latitude is None):
+            raise ValueError("longitude and latitude must be given together")
+        return self
 
 
 class EventListResponse(BaseModel):
@@ -112,11 +119,46 @@ async def get_event(db: DBSession, uid: UUID):
 
 
 @router.get("/events", response_model=EventListResponse)
-def list_events(db: DBSession, filters: Annotated[EventListRequest, Query()]):
-    # support within in my radius from my home location
-    query = """select e.*, v.performer_uid as performer_uid, ST_AsText(v.location) as location 
-                    from events e join venues v
-                    on e.venue_uid=v.uid 
-                    where
+async def list_events(db: DBSession, filters: Annotated[EventListRequest, Query()]):
+    q = QueryBuilder()
+
+    q.where("e.id > {}", filters.after)
+
+    if filters.longitude is not None and filters.latitude is not None:
+        q.where(
             """
-    where = []
+            ST_DWithin(
+                v.location,
+                ST_SetSRID(ST_MakePoint({}, {}), 4326)::geography,
+                {}
+            )
+            """,
+            filters.longitude,
+            filters.latitude,
+            filters.radius * 1000,  # converting km to m as pg will be using the m
+        )
+
+    q.args.append(filters.limit)
+
+    query = f"""
+            SELECT
+                e.*,
+                v.name as venue_name,
+                ST_AsText(v.location) as venue_location
+            FROM events e
+            JOIN venues v ON e.venue_uid = v.uid
+            WHERE {q.build_where()}
+            ORDER BY e.id ASC
+            LIMIT ${len(q.args)}
+        """
+
+    rows: list[Record] = await db.fetch(query, *q.args)
+    return EventListResponse(
+        events=[
+            EventResponseWithVenueInfo(
+                **row,
+                venue=Venue(name=row["venue_name"], location=row["venue_location"]),
+            )
+            for row in rows
+        ]
+    )

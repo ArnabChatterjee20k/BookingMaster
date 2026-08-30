@@ -758,6 +758,222 @@ def test_malformed_event_uid_is_422(c):
     assert r.status_code == 422, f"expected 422, got {r.status_code} {r.text}"
 
 
+# ---------------------------------------------------------------- list events
+
+# The geo tests sit at negative longitudes on purpose: every other venue in this
+# file lands at a positive longitude (`_make_venue` uses `len(results) % 170`,
+# the venue section uses Bangalore), so nothing else can drift into radius.
+_PACIFIC = (-150.0, -40.0)
+# ~5 km east of _PACIFIC: one degree of longitude at lat -40 is ~85.4 km.
+_PACIFIC_5KM = (-149.9415, -40.0)
+
+
+def _geo_event(c, name, longitude, latitude):
+    """Venue at an exact point + an event in it; returns the event uid."""
+    r = c.post(
+        "/venues",
+        json=_venue_body(state["org"]["uid"], _unique(name), longitude, latitude),
+        cookies=state["alice_auth"],
+    )
+    assert r.status_code == 200, r.text
+    e = c.post(
+        "/events",
+        json=_event_body(r.json()["uid"], name),
+        cookies=state["alice_auth"],
+    )
+    assert e.status_code == 200, e.text
+    return e.json()["uid"]
+
+
+def _uids(response):
+    assert response.status_code == 200, response.text
+    return {e["uid"] for e in response.json()["events"]}
+
+
+@step("event", "venue_a")
+def test_list_events_returns_venue_info(c):
+    """Same aliasing trap as /events/{uid}: `e.*` already carries `name`, so an
+    unaliased join hands back the event name as the venue name."""
+    r = c.get("/events", params={"limit": 100})
+    assert r.status_code == 200, r.text
+    events = r.json()["events"]
+    assert events, "expected at least the event created earlier"
+    for e in events:
+        assert set(e["venue"]) == {"name", "location"}, e
+        assert set(e["venue"]["location"]) == {"longitude", "latitude"}, e
+    mine = [e for e in events if e["uid"] == state["event"]["uid"]]
+    assert mine, "the known event is missing from the listing"
+    assert mine[0]["name"] == "opening night", mine[0]
+    assert mine[0]["venue"]["name"] == state["venue_a"]["name"], mine[0]["venue"]
+    assert mine[0]["venue"]["location"] == state["venue_a"]["location"], mine[0]
+
+
+@step()
+def test_list_event_limit_bounds_are_enforced(c):
+    assert c.get("/events", params={"limit": 0}).status_code == 422
+    assert c.get("/events", params={"limit": 101}).status_code == 422
+    assert c.get("/events", params={"limit": 1}).status_code == 200
+    assert c.get("/events", params={"limit": 100}).status_code == 200
+
+
+@step("event")
+def test_list_events_are_unauthenticated(c):
+    """Mirrors the venue reads: /events takes no CurrentUser, so the listing is
+    world-readable and unscoped. Flip to 401 if events become org-scoped."""
+    assert c.get("/events").status_code == 200
+
+
+@step()
+def test_list_events_respects_limit(c):
+    r = c.get("/events", params={"limit": 1})
+    assert r.status_code == 200, r.text
+    assert len(r.json()["events"]) <= 1, r.json()
+
+
+@step("alice_auth", "org")
+def test_list_event_pagination_covers_every_row_exactly_once(c):
+    """Walk the keyset cursor to the end; every event appears exactly once."""
+    mine = {_geo_event(c, f"page-{i}", 120.0 + i, 40.0) for i in range(5)}
+
+    seen, after, pages = [], 0, 0
+    while True:
+        r = c.get("/events", params={"after": after, "limit": 2})
+        assert r.status_code == 200, r.text
+        batch = r.json()["events"]
+        seen.extend(e["uid"] for e in batch)
+        pages += 1
+        assert pages < 100, "cursor never terminated -- pagination is looping"
+        if len(batch) < 2:
+            break
+        after = batch[-1]["id"]
+
+    assert len(seen) == len(set(seen)), "duplicate rows across pages"
+    assert mine <= set(seen), f"pagination skipped {len(mine - set(seen))} events"
+
+
+@step("alice_auth", "org")
+def test_list_events_ordered_by_id_ascending(c):
+    r = c.get("/events", params={"limit": 100})
+    assert r.status_code == 200, r.text
+    ids = [e["id"] for e in r.json()["events"]]
+    assert ids == sorted(ids), ids
+
+
+@step("alice_auth", "org")
+def test_geo_filter_uses_km_not_metres(c):
+    """ST_DWithin on geography takes metres, so the km radius has to be scaled.
+    Without the *1000 a 10 km search reaches 10 m and misses the 5 km neighbour."""
+    here = _geo_event(c, "pacific", *_PACIFIC)
+    near = _geo_event(c, "pacific-5km", *_PACIFIC_5KM)
+    lon, lat = _PACIFIC
+
+    tight = _uids(
+        c.get(
+            "/events",
+            params={"longitude": lon, "latitude": lat, "radius": 1, "limit": 100},
+        )
+    )
+    assert here in tight, "the point itself fell outside a 1 km radius"
+    assert near not in tight, "a venue 5 km away came back for a 1 km radius"
+
+    wide = _uids(
+        c.get(
+            "/events",
+            params={"longitude": lon, "latitude": lat, "radius": 10, "limit": 100},
+        )
+    )
+    assert {here, near} <= wide, "a 10 km radius missed a venue 5 km away"
+
+
+@step("alice_auth", "org", "event")
+def test_geo_filter_excludes_far_away(c):
+    lon, lat = _PACIFIC
+    got = _uids(
+        c.get(
+            "/events",
+            params={"longitude": lon, "latitude": lat, "radius": 100, "limit": 100},
+        )
+    )
+    assert state["event"]["uid"] not in got, "an event ~13000 km away passed the filter"
+
+
+@step("alice_auth", "org")
+def test_geo_filter_works_at_zero_coordinates(c):
+    """Guards `if lon and lat` truthiness: longitude 0 and latitude 0 are real
+    coordinates, and a falsy check silently drops the filter and returns
+    everything with a 200."""
+    at_zero = _geo_event(c, "null-island", 0.0, 0.0)
+    got = _uids(
+        c.get(
+            "/events", params={"longitude": 0, "latitude": 0, "radius": 1, "limit": 100}
+        )
+    )
+    assert at_zero in got, got
+    assert got == {at_zero}, f"filter was skipped -- got {len(got)} events, expected 1"
+
+    # latitude 0 with a non-zero longitude is the other half of the same trap
+    off_equator = _uids(
+        c.get(
+            "/events",
+            params={"longitude": 120.0, "latitude": 0, "radius": 1, "limit": 100},
+        )
+    )
+    assert off_equator == set(), f"filter was skipped -- got {len(off_equator)} events"
+
+
+@step("alice_auth", "org")
+def test_geo_filter_binds_every_argument(c):
+    """Guards `fetch(query, *q.args)`: with a location the query grows to five
+    placeholders, and hardcoding (after, limit) leaves three unbound -- asyncpg
+    raises InterfaceError and it surfaces as a 500."""
+    lon, lat = _PACIFIC
+    for i in range(3):
+        _geo_event(c, f"pac-page-{i}", lon, lat + 0.001 * i)
+    r = c.get(
+        "/events",
+        params={
+            "longitude": lon,
+            "latitude": lat,
+            "radius": 10,
+            "after": 0,
+            "limit": 2,
+        },
+    )
+    assert r.status_code == 200, f"expected 200, got {r.status_code} {r.text}"
+    assert len(r.json()["events"]) == 2, "limit did not bind to the right placeholder"
+
+
+@step()
+def test_half_a_coordinate_is_422(c):
+    """One coordinate without the other must not silently list everything."""
+    for params in ({"longitude": 77.5946}, {"latitude": 12.9716}):
+        r = c.get("/events", params={**params, "radius": 5})
+        assert (
+            r.status_code == 422
+        ), f"expected 422 for {params}, got {r.status_code} {r.text}"
+
+
+@step()
+def test_out_of_range_filter_coordinates_are_422(c):
+    for params in (
+        {"longitude": 181.0, "latitude": 0.0},
+        {"longitude": 0.0, "latitude": 91.0},
+    ):
+        r = c.get("/events", params=params)
+        assert (
+            r.status_code == 422
+        ), f"expected 422 for {params}, got {r.status_code} {r.text}"
+
+
+@step()
+def test_radius_bounds_are_enforced(c):
+    base = {"longitude": 77.5946, "latitude": 12.9716}
+    assert c.get("/events", params={**base, "radius": 0}).status_code == 422
+    assert c.get("/events", params={**base, "radius": 101}).status_code == 422
+    assert c.get("/events", params={**base, "radius": 1}).status_code == 200
+    assert c.get("/events", params={**base, "radius": 100}).status_code == 200
+
+
 def main():
     truncate()
     passed = failed = skipped = 0
