@@ -81,6 +81,9 @@ async def load_schemas():
             unique(name, location)
         )
     """)
+    await conn.execute(
+        "create index if not exists venues_location_gist on venues USING GIST (location);"
+    )
 
     # events
     await conn.execute("""
@@ -97,6 +100,9 @@ async def load_schemas():
             ends_at timestamptz not null
         )
     """)
+    await conn.execute(
+        "create index if not exists events_venue_uid_idex on events(venue_uid);"
+    )
 
     # tickets tier
     await conn.execute("""
