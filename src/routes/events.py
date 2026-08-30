@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, status, Query
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Annotated, Self
 from uuid import UUID, uuid4
 from asyncpg import Record
@@ -123,6 +123,8 @@ async def list_events(db: DBSession, filters: Annotated[EventListRequest, Query(
     q = QueryBuilder()
 
     q.where("e.id > {}", filters.after)
+    # events starting before one day
+    q.where("e.starts_at >= {}", datetime.now(timezone.utc) + timedelta(days=1))
 
     if filters.longitude is not None and filters.latitude is not None:
         q.where(

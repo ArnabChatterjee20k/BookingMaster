@@ -1,10 +1,10 @@
 import jwt
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from ..config import Config
 
 
 def get_token(user_id):
-    expiry = datetime.now() + timedelta(days=30)
+    expiry = datetime.now(timezone.utc) + timedelta(days=30)
     return jwt.encode(
         {"user_id": str(user_id), "exp": expiry},
         Config.jwt_secret,

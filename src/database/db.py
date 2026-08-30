@@ -101,8 +101,10 @@ async def load_schemas():
         )
     """)
     await conn.execute(
-        "create index if not exists events_venue_uid_idex on events(venue_uid);"
+        "create index if not exists events_venue_uid_idx on events(venue_uid);"
     )
+    # no index is needed on starts_at as we are orderin by id and postgres not using the index on starts_at or (id, starts_at)
+    # if ordering by starts_at, id then having index on (starts_at, id) will help
 
     # tickets tier
     await conn.execute("""

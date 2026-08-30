@@ -125,7 +125,10 @@ async def seed(args):
     await conn.copy_records_to_table(
         "users", records=users, columns=["uid", "email", "name", "password"]
     )
-    print(f"users          {len(users):>8}" + ("  (probe reused)" if existing_probe else ""))
+    print(
+        f"users          {len(users):>8}"
+        + ("  (probe reused)" if existing_probe else "")
+    )
 
     # -------------------------------------------------------- organisations
     org_uids = [uuid.uuid4() for _ in range(args.orgs)]
@@ -322,7 +325,9 @@ async def seed(args):
     print("  explain analyze select o.* from organisations o")
     print("  join memberships m on m.org_uid = o.uid")
     print(f"  where m.user_uid = '{probe_uid}' order by o.id limit 10;")
-    print(f"\n  GET /events?longitude={args.lon}&latitude={args.lat}&radius=10&limit=10")
+    print(
+        f"\n  GET /events?longitude={args.lon}&latitude={args.lat}&radius=10&limit=10"
+    )
     print("  (run with and without --indexes to compare the plans)")
 
     await conn.close()
@@ -366,7 +371,9 @@ def main():
     p.add_argument("--keep", action="store_true", help="append instead of truncating")
     p.add_argument("--seed", type=int, default=0, help="rng seed, for repeatable data")
     p.add_argument(
-        "--indexes", action="store_true", help="create the geo/join indexes after seeding"
+        "--indexes",
+        action="store_true",
+        help="create the geo/join indexes after seeding",
     )
     p.add_argument(
         "--drop-indexes", action="store_true", help="drop those indexes and exit"
