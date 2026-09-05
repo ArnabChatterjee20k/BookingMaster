@@ -76,14 +76,20 @@ async def create_event(db: DBSession, event: EventCreateRequest, user: CurrentUs
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, "Not a owner. Owner can only create event"
         )
+    # check any events scheduled on a venue id or not. atleast 2days gap
+    row: Record | None = await db.fetchrow("""select id from events where venue_uid=$1 and starts_at - interval '2days' and starts_at + interval '2days' limit 1""",event.venue_uid, event.starts_at)
+    if row:
+        raise HTTPException(status.HTTP_409_CONFLICT, "venue already booked and should have a gap of atleast of 2days before start and after start")
+
     # insert if venue exists in a single query basically by pulling the v.uid from venues and passing other values as constant directly to the select
     # also we have unique index on the uuid already
+    # venue also must belong to the org as well
     row: Record | None = await db.fetchrow(
         """
         insert into events(uid, name, org_uid, performer_uid, venue_uid, starts_at, ends_at)
         select $1, $2, $3, $4, v.uid, $6, $7
           from venues v
-         where v.uid = $5
+         where v.uid = $5 and v.org_uid = $3
         returning *
     """,
         uuid4(),
@@ -164,3 +170,8 @@ async def list_events(db: DBSession, filters: Annotated[EventListRequest, Query(
             for row in rows
         ]
     )
+
+
+@router.post("/events/{uid}/tickets")
+def create_tickets():
+    pass
