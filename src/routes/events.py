@@ -69,37 +69,47 @@ class EventListRequest(BaseModel):
 class EventListResponse(BaseModel):
     events: list[EventResponseWithVenueInfo]
 
-
 @router.post("/events", response_model=EventResponse)
 async def create_event(db: DBSession, event: EventCreateRequest, user: CurrentUser):
     if await get_role(db, event.org_uid, user.uid) != MemberRole.OWNER:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, "Not a owner. Owner can only create event"
         )
-    # check any events scheduled on a venue id or not. atleast 2days gap
-    row: Record | None = await db.fetchrow("""select id from events where venue_uid=$1 and starts_at - interval '2days' and starts_at + interval '2days' limit 1""",event.venue_uid, event.starts_at)
-    if row:
-        raise HTTPException(status.HTTP_409_CONFLICT, "venue already booked and should have a gap of atleast of 2days before start and after start")
+    async with db.transaction():
+        venue: Record | None = await db.fetchrow("""select 1 from venues where uid=$1 and org_uid=$2 for update""", event.venue_uid, event.org_uid)
+        if not venue:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "venue not found")
 
-    # insert if venue exists in a single query basically by pulling the v.uid from venues and passing other values as constant directly to the select
-    # also we have unique index on the uuid already
-    # venue also must belong to the org as well
-    row: Record | None = await db.fetchrow(
-        """
-        insert into events(uid, name, org_uid, performer_uid, venue_uid, starts_at, ends_at)
-        select $1, $2, $3, $4, v.uid, $6, $7
-          from venues v
-         where v.uid = $5 and v.org_uid = $3
-        returning *
-    """,
-        uuid4(),
-        event.name,
-        event.org_uid,
-        event.performer_uid,
-        event.venue_uid,
-        event.starts_at,
-        event.ends_at,
-    )
+        # check any events scheduled on a venue id or not. atleast 2days gap
+        row: Record | None = await db.fetchrow(
+                    """
+                    select id
+                    from events
+                    where venue_uid = $1
+                    and starts_at BETWEEN $2 - interval '2 days'
+                                        AND $2 + interval '2 days'
+                    limit 1
+                    """,
+                    event.venue_uid,
+                    event.starts_at,
+                )
+        if row:
+            raise HTTPException(status.HTTP_409_CONFLICT, "venue already booked and should have a gap of atleast of 2days before start and after start")
+
+        row: Record | None = await db.fetchrow(
+            """
+            insert into events(uid, name, org_uid, performer_uid, venue_uid, starts_at, ends_at)
+            values ($1, $2, $3, $4, $5, $6, $7)
+            returning *
+        """,
+            uuid4(),
+            event.name,
+            event.org_uid,
+            event.performer_uid,
+            event.venue_uid,
+            event.starts_at,
+            event.ends_at,
+        )
 
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "venue not found")
@@ -149,15 +159,15 @@ async def list_events(db: DBSession, filters: Annotated[EventListRequest, Query(
     q.args.append(filters.limit)
 
     query = f"""
-            SELECT
+            select
                 e.*,
                 v.name as venue_name,
                 ST_AsText(v.location) as venue_location
-            FROM events e
-            JOIN venues v ON e.venue_uid = v.uid
-            WHERE {q.build_where()}
-            ORDER BY e.id ASC
-            LIMIT ${len(q.args)}
+            from events e
+            join venues v ON e.venue_uid = v.uid
+            where {q.build_where()}
+            order by e.id ASC
+            limit ${len(q.args)}
         """
 
     rows: list[Record] = await db.fetch(query, *q.args)
@@ -170,7 +180,6 @@ async def list_events(db: DBSession, filters: Annotated[EventListRequest, Query(
             for row in rows
         ]
     )
-
 
 @router.post("/events/{uid}/tickets")
 def create_tickets():
