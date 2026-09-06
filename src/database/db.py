@@ -25,6 +25,9 @@ async def load_schemas():
     # postgis extension
     await conn.execute("create extension if not exists postgis")
 
+    # string collation for case insensitive matching
+    await conn.execute("CREATE COLLATION IF NOT EXISTS utf8_ci_ai ( provider = icu, locale = 'und-u-ks-level1', deterministic = false )")
+
     # users
     await conn.execute("""
         create table if not exists users (
@@ -119,6 +122,10 @@ async def load_schemas():
             available integer not null
         )
     """)
+    await conn.execute(
+        "create unique index if not exists tickets_tier_event_uid_name_idx"
+        " on tickets_tier(event_uid, name);"
+    )
 
     # bookings
     await conn.execute("""
