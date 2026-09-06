@@ -6,6 +6,12 @@
     python seed.py --keep               # append instead of truncating first
     python seed.py --indexes            # also create the geo/join indexes
     python seed.py --drop-indexes       # remove them again, to A/B a plan
+    python seed.py --dev-user-only      # just arnab/appwrite, leave the rest alone
+
+Every run also creates `arnab` (password `arnab`), owner of the `appwrite`
+organisation, with venues and events he owns -- a stable account to hand-test
+the API against. Its cookie is printed at the end. `--dev-user-only` creates
+just that, idempotently, without touching anything else.
 
 Every organisation gets exactly one owner, then `--extra-members` additional
 (org, user) pairs are drawn at random, so the membership table has realistic
@@ -43,6 +49,14 @@ from src.database.db import load_schemas
 
 PASSWORD = "seeded-not-a-real-password"
 PROBE_EMAIL = "probe@seed.local"
+
+# A stable hand-testable account, separate from the probe user. Credentials are
+# deliberately trivial: this is dev seed data, and the login route still compares
+# passwords in cleartext.
+DEV_EMAIL = "arnab"
+DEV_NAME = "arnab"
+DEV_PASSWORD = "arnab"
+DEV_ORG = "appwrite"
 
 # truncate order: children first, so cascade has nothing to chase
 TABLES = [
@@ -83,6 +97,116 @@ async def apply_indexes(conn, create: bool):
         print(f"  {'created' if create else 'dropped'}  {name}")
 
 
+async def seed_dev_user(conn, args, now):
+    """Create arnab / appwrite and give him venues and events he owns.
+
+    Every step is idempotent and keyed on a stable name, so this can be re-run
+    against an already-populated database (--dev-user-only) without duplicating
+    rows or truncating anything.
+    """
+    if args.dev_venues < 1:
+        raise SystemExit("--dev-venues must be at least 1; events need a venue")
+
+    user_uid = await conn.fetchval("select uid from users where email = $1", DEV_EMAIL)
+    if user_uid is None:
+        user_uid = uuid.uuid4()
+        await conn.execute(
+            "insert into users(uid, email, name, password) values ($1, $2, $3, $4)",
+            user_uid,
+            DEV_EMAIL,
+            DEV_NAME,
+            DEV_PASSWORD,
+        )
+
+    # organisations.name has no unique constraint, so adopt the oldest match by
+    # name rather than leaning on ON CONFLICT.
+    org_uid = await conn.fetchval(
+        "select uid from organisations where name = $1 order by id limit 1", DEV_ORG
+    )
+    if org_uid is None:
+        org_uid = uuid.uuid4()
+        await conn.execute(
+            "insert into organisations(uid, name) values ($1, $2)", org_uid, DEV_ORG
+        )
+
+    # owner, not member: create_event and the ticket-tier upsert both require it
+    await conn.execute(
+        "insert into memberships(uid, org_uid, user_uid, role) values ($1, $2, $3, 'owner') "
+        "on conflict (org_uid, user_uid) do update set role = 'owner'",
+        uuid.uuid4(),
+        org_uid,
+        user_uid,
+    )
+
+    # venues is unique(name, location), so the coordinates are derived from the
+    # index instead of randomised -- a re-run has to collide to stay idempotent.
+    venue_uids = []
+    for i in range(args.dev_venues):
+        name = f"{DEV_ORG}-venue-{i}"
+        location = f"SRID=4326;POINT({args.lon + i * 0.01} {args.lat + i * 0.01})"
+        venue_uid = await conn.fetchval(
+            "insert into venues(uid, creator_user_uid, org_uid, name, location) "
+            "values ($1, $2, $3, $4, $5::geography) "
+            "on conflict (name, location) do nothing returning uid",
+            uuid.uuid4(),
+            user_uid,
+            org_uid,
+            name,
+            location,
+        )
+        if venue_uid is None:  # left over from an earlier run
+            venue_uid = await conn.fetchval(
+                "select uid from venues where name = $1 and org_uid = $2", name, org_uid
+            )
+        venue_uids.append(venue_uid)
+
+    # Two API rules shape the timings, so hand-testing doesn't hit a 409 or an
+    # empty list:
+    #   - create_event wants a gap either side of an existing event at the same
+    #     venue, so events sharing a venue are spaced 5 days apart.
+    #   - list_events hides anything starting within the next 24h, so the first
+    #     one lands 2 days out and all of them show up in GET /events.
+    event_uids = []
+    for i in range(args.dev_events):
+        name = f"{DEV_ORG}-event-{i}"
+        venue_uid = venue_uids[i % len(venue_uids)]
+        starts = now + timedelta(days=2 + 5 * (i // len(venue_uids)))
+        event_uid = await conn.fetchval(
+            "insert into events"
+            "(uid, name, org_uid, performer_uid, venue_uid, starts_at, ends_at) "
+            # the casts matter: bare $2 in a SELECT list infers text, but the
+            # same placeholder meets varchar in the NOT EXISTS, and Postgres
+            # refuses to deduce two types for one parameter
+            "select $1::uuid, $2::varchar, $3::uuid, $4::uuid, $5::uuid,"
+            "       $6::timestamptz, $7::timestamptz "
+            " where not exists (select 1 from events where name = $2 and org_uid = $3) "
+            "returning uid",
+            uuid.uuid4(),
+            name,
+            org_uid,
+            user_uid,  # performer_uid is a user_uid; he headlines his own events
+            venue_uid,
+            starts,
+            starts + timedelta(hours=3),
+        )
+        if event_uid is None:
+            event_uid = await conn.fetchval(
+                "select uid from events where name = $1 and org_uid = $2", name, org_uid
+            )
+        event_uids.append(event_uid)
+
+    # No ticket tiers on purpose: PUT /events/{uid}/tickets is the thing being
+    # built, so its insert path should have somewhere to land.
+    print(f"\ndev user       {DEV_EMAIL} / {DEV_PASSWORD} -> {user_uid}")
+    print(f"  org          {DEV_ORG} -> {org_uid}  (owner)")
+    print(f"  venues       {len(venue_uids)}")
+    print(f"  events       {len(event_uids)}  (earliest starts in 2 days)")
+    print(f"  cookie:      {Config.auth_cookie_name}={get_token(user_uid)}")
+    if event_uids:
+        print(f"  an event:    {event_uids[0]}")
+    return user_uid, org_uid, event_uids
+
+
 async def seed(args):
     rng = random.Random(args.seed)
     started = perf_counter()
@@ -96,6 +220,12 @@ async def seed(args):
 
     if args.drop_indexes:
         await apply_indexes(conn, create=False)
+        await conn.close()
+        return
+
+    # runnable against an already-seeded database: touches nothing else
+    if args.dev_user_only:
+        await seed_dev_user(conn, args, now)
         await conn.close()
         return
 
@@ -308,6 +438,8 @@ async def seed(args):
     )
     print(f"tickets        {len(tickets):>8}")
 
+    await seed_dev_user(conn, args, now)
+
     if args.indexes:
         await apply_indexes(conn, create=True)
 
@@ -377,6 +509,17 @@ def main():
     )
     p.add_argument(
         "--drop-indexes", action="store_true", help="drop those indexes and exit"
+    )
+    p.add_argument(
+        "--dev-venues", type=int, default=2, help=f"venues owned by {DEV_ORG}"
+    )
+    p.add_argument(
+        "--dev-events", type=int, default=6, help=f"events owned by {DEV_ORG}"
+    )
+    p.add_argument(
+        "--dev-user-only",
+        action="store_true",
+        help=f"only create {DEV_EMAIL}/{DEV_ORG} and exit, leaving all other data alone",
     )
     asyncio.run(seed(p.parse_args()))
 
