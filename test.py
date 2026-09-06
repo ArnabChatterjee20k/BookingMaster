@@ -617,14 +617,18 @@ def _make_venue(c, name=None):
     return r.json()
 
 
-def _event_body(venue_uid, name="gig", org_uid=None):
+def _event_body(venue_uid, name="gig", org_uid=None, starts_in_hours=48):
+    """Default start is two days out, not one hour: `list_events` filters
+    `starts_at >= now + 1 day`, so anything sooner is created but never listed.
+    Pass `starts_in_hours` to sit deliberately either side of that horizon, or
+    to dodge the 2-day booking gap when reusing a venue."""
     return {
         "name": name,
         "org_uid": org_uid or state["org"]["uid"],
         "performer_uid": str(uuid.uuid4()),
         "venue_uid": venue_uid,
-        "starts_at": _iso(1),
-        "ends_at": _iso(3),
+        "starts_at": _iso(starts_in_hours),
+        "ends_at": _iso(starts_in_hours + 2),
     }
 
 
@@ -972,6 +976,498 @@ def test_radius_bounds_are_enforced(c):
     assert c.get("/events", params={**base, "radius": 101}).status_code == 422
     assert c.get("/events", params={**base, "radius": 1}).status_code == 200
     assert c.get("/events", params={**base, "radius": 100}).status_code == 200
+
+
+# ------------------------------------------------------------------- sessions
+
+
+def _account(c, label="user", password="hunter2"):
+    """A user with credentials the caller knows; leaves the client anonymous."""
+    email = f"{label}-{uuid.uuid4().hex[:8]}@test.local"
+    r = c.post("/users", json={"email": email, "name": label, "password": password})
+    assert r.status_code == 200, r.text
+    auth = {AUTH: r.cookies.get(AUTH)}
+    c.cookies.clear()
+    return r.json(), auth, email, password
+
+
+def _login(c, email, password, cookies=None):
+    """POST a session; returns (response, token) and leaves the client anonymous
+    so a stray cookie can't make a later anonymous test pass by accident."""
+    r = c.post(
+        "/users/sessions",
+        json={"email": email, "password": password},
+        cookies=cookies or {},
+    )
+    token = r.cookies.get(AUTH)
+    c.cookies.clear()
+    return r, token
+
+
+@step()
+def test_login_returns_user_and_a_working_cookie(c):
+    user, _, email, password = _account(c, "login")
+    r, token = _login(c, email, password)
+    assert r.status_code == 200, r.text
+    assert r.json()["uid"] == user["uid"], r.json()
+    assert token, f"no {AUTH} cookie on the session response"
+    me = c.get("/users", cookies={AUTH: token})
+    assert me.status_code == 200, f"the issued cookie does not authenticate: {me.text}"
+    assert me.json()["uid"] == user["uid"], me.json()
+
+
+@step()
+def test_login_with_wrong_password_is_400(c):
+    _, _, email, _ = _account(c, "wrongpw")
+    r, token = _login(c, email, "not-the-password")
+    assert r.status_code == 400, f"expected 400, got {r.status_code} {r.text}"
+    assert not token, "a rejected login still handed out an auth cookie"
+
+
+@step()
+def test_login_with_unknown_email_is_400(c):
+    r, token = _login(c, f"ghost-{uuid.uuid4().hex}@test.local", "hunter2")
+    assert r.status_code == 400, f"expected 400, got {r.status_code} {r.text}"
+    assert not token, "a login for a non-existent user handed out a cookie"
+
+
+@step()
+def test_login_does_not_echo_the_password(c):
+    """`select *` pulls the password column into the row; UserResponse is what
+    keeps it out of the body."""
+    _, _, email, password = _account(c, "leak")
+    r, _ = _login(c, email, password)
+    assert r.status_code == 200, r.text
+    assert "password" not in r.json(), r.json()
+    assert password not in r.text, "the password came back in the response"
+
+
+@step()
+def test_login_switches_identity_when_a_cookie_is_present(c):
+    """Signing in as someone else while holding an old cookie must return the
+    new identity -- otherwise a shared browser silently keeps the first user."""
+    _, alice_auth, _, _ = _account(c, "switch-a")
+    bob, _, bob_email, bob_password = _account(c, "switch-b")
+
+    r, token = _login(c, bob_email, bob_password, cookies=alice_auth)
+    assert r.status_code == 200, r.text
+    assert r.json()["uid"] == bob["uid"], f"logged in as bob, got back {r.json()}"
+    assert token, "no cookie issued for the new identity"
+    me = c.get("/users", cookies={AUTH: token})
+    assert me.json()["uid"] == bob["uid"], me.json()
+
+
+@step()
+def test_login_rejects_malformed_body(c):
+    r = c.post("/users/sessions", json={"email": "someone@test.local"})
+    assert r.status_code == 422, f"expected 422, got {r.status_code} {r.text}"
+
+
+@step("alice_auth")
+def test_get_current_user(c):
+    r = c.get("/users", cookies=state["alice_auth"])
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert {"uid", "name", "email"} <= set(body), body
+    assert "password" not in body, body
+
+
+@step()
+def test_get_current_user_anonymous_is_401(c):
+    r = c.get("/users")
+    assert r.status_code == 401, f"expected 401, got {r.status_code} {r.text}"
+
+
+@step()
+def test_get_current_user_with_garbage_token_is_401(c):
+    r = c.get("/users", cookies={AUTH: "not.a.jwt"})
+    assert r.status_code == 401, f"expected 401, got {r.status_code} {r.text}"
+
+
+# ------------------------------------------------------ event scheduling rules
+
+
+@step("alice_auth", "org")
+def test_second_event_at_the_same_venue_is_409(c):
+    venue = _make_venue(c, _unique("gap"))
+    first = c.post(
+        "/events",
+        json=_event_body(venue["uid"], "first", starts_in_hours=72),
+        cookies=state["alice_auth"],
+    )
+    assert first.status_code == 200, first.text
+    clash = c.post(  # +1 day: inside the 2-day window
+        "/events",
+        json=_event_body(venue["uid"], "clash", starts_in_hours=96),
+        cookies=state["alice_auth"],
+    )
+    assert clash.status_code == 409, f"expected 409, got {clash.status_code} {clash.text}"
+
+
+@step("alice_auth", "org")
+def test_gap_window_looks_backwards_too(c):
+    """The window is two-sided. An existing event that starts BEFORE the new one
+    but within two days of it has to conflict as well -- a one-sided
+    `starts_at >= new AND starts_at <= new + 2 days` passes this by."""
+    venue = _make_venue(c, _unique("backgap"))
+    later = c.post(
+        "/events",
+        json=_event_body(venue["uid"], "later", starts_in_hours=24 * 10),
+        cookies=state["alice_auth"],
+    )
+    assert later.status_code == 200, later.text
+    earlier = c.post(
+        "/events",
+        json=_event_body(venue["uid"], "earlier", starts_in_hours=24 * 9),
+        cookies=state["alice_auth"],
+    )
+    assert (
+        earlier.status_code == 409
+    ), f"expected 409 looking backwards, got {earlier.status_code} {earlier.text}"
+
+
+@step("alice_auth", "org")
+def test_event_outside_the_gap_is_allowed(c):
+    venue = _make_venue(c, _unique("nogap"))
+    first = c.post(
+        "/events",
+        json=_event_body(venue["uid"], "first", starts_in_hours=48),
+        cookies=state["alice_auth"],
+    )
+    assert first.status_code == 200, first.text
+    later = c.post(  # +3 days clears the window on both sides
+        "/events",
+        json=_event_body(venue["uid"], "later", starts_in_hours=48 + 72),
+        cookies=state["alice_auth"],
+    )
+    assert later.status_code == 200, f"expected 200, got {later.status_code} {later.text}"
+
+
+@step("alice_auth", "org")
+def test_gap_is_scoped_to_one_venue(c):
+    """Two venues can hold events at the same instant."""
+    hall_a, hall_b = _make_venue(c, _unique("hall-a")), _make_venue(c, _unique("hall-b"))
+    at = 24 * 20
+    first = c.post(
+        "/events",
+        json=_event_body(hall_a["uid"], "same-night-a", starts_in_hours=at),
+        cookies=state["alice_auth"],
+    )
+    second = c.post(
+        "/events",
+        json=_event_body(hall_b["uid"], "same-night-b", starts_in_hours=at),
+        cookies=state["alice_auth"],
+    )
+    assert first.status_code == 200, first.text
+    assert (
+        second.status_code == 200
+    ), f"a different venue conflicted: {second.status_code} {second.text}"
+
+
+@step("alice_auth", "bob_auth")
+def test_cannot_book_a_venue_owned_by_another_org(c):
+    """create_event gates on `venues.org_uid = $2`, so a real venue uid that
+    belongs to somebody else's org is a 404, not a silent cross-org booking."""
+    theirs = c.post(
+        "/organisations", json={"name": _unique("other-org")}, cookies=state["bob_auth"]
+    )
+    assert theirs.status_code == 200, theirs.text
+    venue = c.post(
+        "/venues",
+        json=_venue_body(theirs.json()["uid"], _unique("their-hall"), 44.0, 6.0),
+        cookies=state["bob_auth"],
+    )
+    assert venue.status_code == 200, venue.text
+    r = c.post(
+        "/events",
+        json=_event_body(venue.json()["uid"], "trespass"),
+        cookies=state["alice_auth"],
+    )
+    assert r.status_code == 404, f"expected 404, got {r.status_code} {r.text}"
+
+
+@step("alice_auth", "org")
+def test_conflicting_event_writes_nothing(c):
+    """The 409 is raised inside the transaction, so the rollback has to leave
+    the venue holding exactly the one event that succeeded."""
+    venue = _make_venue(c, _unique("rollback"))
+    at = 24 * 30
+    kept = c.post(
+        "/events",
+        json=_event_body(venue["uid"], "kept", starts_in_hours=at),
+        cookies=state["alice_auth"],
+    )
+    assert kept.status_code == 200, kept.text
+    dropped = c.post(
+        "/events",
+        json=_event_body(venue["uid"], "dropped", starts_in_hours=at + 12),
+        cookies=state["alice_auth"],
+    )
+    assert dropped.status_code == 409, dropped.text
+
+    r = c.get("/events", params={"after": kept.json()["id"] - 1, "limit": 100})
+    assert r.status_code == 200, r.text
+    here = [e["name"] for e in r.json()["events"] if e["venue_uid"] == venue["uid"]]
+    assert here == ["kept"], f"expected only the accepted event, found {here}"
+
+
+# --------------------------------------------------------------- list horizon
+
+
+@step("alice_auth", "org")
+def test_listing_hides_events_starting_within_a_day(c):
+    venue = _make_venue(c, _unique("soon"))
+    r = c.post(
+        "/events",
+        json=_event_body(venue["uid"], "too soon", starts_in_hours=2),
+        cookies=state["alice_auth"],
+    )
+    assert r.status_code == 200, r.text
+    event = r.json()
+    # the horizon is a listing rule, not a delete: it is still fetchable by uid
+    assert c.get(f"/events/{event['uid']}").status_code == 200
+    listed = _uids(c.get("/events", params={"after": event["id"] - 1, "limit": 100}))
+    assert event["uid"] not in listed, "an event starting in 2 hours was listed"
+
+
+@step("alice_auth", "org")
+def test_listing_shows_events_past_the_horizon(c):
+    venue = _make_venue(c, _unique("ahead"))
+    r = c.post(
+        "/events",
+        json=_event_body(venue["uid"], "well ahead", starts_in_hours=24 * 40),
+        cookies=state["alice_auth"],
+    )
+    assert r.status_code == 200, r.text
+    event = r.json()
+    listed = _uids(c.get("/events", params={"after": event["id"] - 1, "limit": 100}))
+    assert event["uid"] in listed, "an event 40 days out was filtered away"
+
+
+# --------------------------------------------------------------- ticket tiers
+
+
+def _tier(name="gold", price="750.50", available=100):
+    return {"name": name, "price": price, "available": available}
+
+
+def _tier_event(c, label):
+    """A venue + event owned by alice, far enough out to dodge both the gap
+    check and the listing horizon."""
+    venue = _make_venue(c, _unique(label))
+    r = c.post(
+        "/events",
+        json=_event_body(venue["uid"], label, starts_in_hours=24 * 60),
+        cookies=state["alice_auth"],
+    )
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+@step("alice_auth", "org")
+def test_owner_creates_ticket_tier(c):
+    event = _tier_event(c, "tier-create")
+    r = c.put(f"/events/{event['uid']}/tickets/tier", json=_tier(), cookies=state["alice_auth"])
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["name"] == "gold", body
+    assert body["event_uid"] == event["uid"], body
+    assert body["available"] == 100, body
+    state["tier_event"] = event
+
+
+@step("alice_auth", "tier_event")
+def test_tier_upsert_updates_in_place(c):
+    """Same (event_uid, name) must land on the existing row via the unique
+    index, not add a second tier."""
+    url = f"/events/{state['tier_event']['uid']}/tickets/tier"
+    first = c.put(
+        url, json=_tier(price="750.50", available=100), cookies=state["alice_auth"]
+    ).json()
+    second = c.put(
+        url, json=_tier(price="999.99", available=40), cookies=state["alice_auth"]
+    )
+    assert second.status_code == 200, second.text
+    body = second.json()
+    assert body["uid"] == first["uid"], "the upsert inserted a new row"
+    assert body["price"] == "999.99", body
+    assert body["available"] == 40, body
+    assert (
+        body["updated_at"] > first["updated_at"]
+    ), f"updated_at stood still: {first['updated_at']} -> {body['updated_at']}"
+
+
+@step("alice_auth", "tier_event")
+def test_tiers_are_keyed_by_name(c):
+    url = f"/events/{state['tier_event']['uid']}/tickets/tier"
+    gold = c.put(url, json=_tier("gold"), cookies=state["alice_auth"]).json()
+    silver = c.put(url, json=_tier("silver"), cookies=state["alice_auth"])
+    assert silver.status_code == 200, silver.text
+    assert silver.json()["uid"] != gold["uid"], "a second tier name reused the row"
+
+
+@step("alice_auth", "org")
+def test_tier_price_keeps_its_cents(c):
+    """numeric(12, 2) round-trip. A float price loses this: 1234567890.10 comes
+    back as 1234567890.1000001."""
+    event = _tier_event(c, "tier-money")
+    r = c.put(
+        f"/events/{event['uid']}/tickets/tier",
+        json=_tier(price="1234567890.10"),
+        cookies=state["alice_auth"],
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["price"] == "1234567890.10", r.json()["price"]
+
+
+@step("alice_auth", "org")
+def test_tier_rejects_sub_cent_price(c):
+    """Better a 422 than silently rounding into numeric(12, 2)."""
+    event = _tier_event(c, "tier-precision")
+    r = c.put(
+        f"/events/{event['uid']}/tickets/tier",
+        json=_tier(price="1.005"),
+        cookies=state["alice_auth"],
+    )
+    assert r.status_code == 422, f"expected 422, got {r.status_code} {r.text}"
+
+
+@step("alice_auth", "org")
+def test_tier_rejects_negative_price(c):
+    event = _tier_event(c, "tier-negative")
+    r = c.put(
+        f"/events/{event['uid']}/tickets/tier",
+        json=_tier(price="-1.00"),
+        cookies=state["alice_auth"],
+    )
+    assert r.status_code == 422, f"expected 422, got {r.status_code} {r.text}"
+
+
+@step("alice_auth", "org")
+def test_tier_ignores_an_event_uid_in_the_body(c):
+    """The event is named by the path. If a body `event_uid` could redirect the
+    write, an owner could pass the role check on their own event and tier
+    somebody else's."""
+    mine = _tier_event(c, "tier-path")
+    other = _tier_event(c, "tier-other")
+    r = c.put(
+        f"/events/{mine['uid']}/tickets/tier",
+        json={**_tier("smuggled"), "event_uid": other["uid"]},
+        cookies=state["alice_auth"],
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["event_uid"] == mine["uid"], (
+        f"the body won: wrote to {r.json()['event_uid']}, expected {mine['uid']}"
+    )
+
+
+@step("bob_auth", "tier_event")
+def test_non_owner_cannot_create_ticket_tier(c):
+    r = c.put(
+        f"/events/{state['tier_event']['uid']}/tickets/tier",
+        json=_tier("bob-tier"),
+        cookies=state["bob_auth"],
+    )
+    assert r.status_code == 403, f"expected 403, got {r.status_code} {r.text}"
+
+
+@step("tier_event")
+def test_anonymous_cannot_create_ticket_tier(c):
+    r = c.put(f"/events/{state['tier_event']['uid']}/tickets/tier", json=_tier("anon-tier"))
+    assert r.status_code == 401, f"expected 401, got {r.status_code} {r.text}"
+
+
+@step("alice_auth")
+def test_ticket_tier_on_unknown_event_is_404(c):
+    r = c.put(
+        f"/events/{uuid.uuid4()}/tickets/tier", json=_tier(), cookies=state["alice_auth"]
+    )
+    assert r.status_code == 404, f"expected 404, got {r.status_code} {r.text}"
+
+
+@step("alice_auth")
+def test_ticket_tier_with_malformed_event_uid_is_422(c):
+    r = c.put("/events/not-a-uuid/tickets/tier", json=_tier(), cookies=state["alice_auth"])
+    assert r.status_code == 422, f"expected 422, got {r.status_code} {r.text}"
+
+
+@step("alice_auth", "org")
+def test_ticket_tier_rejects_malformed_body(c):
+    event = _tier_event(c, "tier-malformed")
+    r = c.put(
+        f"/events/{event['uid']}/tickets/tier",
+        json={"name": "gold"},  # no price, no available
+        cookies=state["alice_auth"],
+    )
+    assert r.status_code == 422, f"expected 422, got {r.status_code} {r.text}"
+
+
+@step("alice_auth", "org")
+def test_get_ticket_tier_returns_a_tier_for_that_event(c):
+    event = _tier_event(c, "tier-read")
+    written = c.put(
+        f"/events/{event['uid']}/tickets/tier",
+        json=_tier("general", price="100.00", available=25),
+        cookies=state["alice_auth"],
+    )
+    assert written.status_code == 200, written.text
+    r = c.get(f"/events/{event['uid']}/tickets/tier")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["event_uid"] == event["uid"], body
+    assert body["uid"] == written.json()["uid"], body
+    assert body["price"] == "100.00", body
+    assert body["available"] == 25, body
+
+
+@step("alice_auth", "org")
+def test_get_ticket_tier_is_unauthenticated(c):
+    """Mirrors the other event reads: no CurrentUser, so tiers are public."""
+    event = _tier_event(c, "tier-public")
+    c.put(
+        f"/events/{event['uid']}/tickets/tier",
+        json=_tier("public"),
+        cookies=state["alice_auth"],
+    )
+    assert c.get(f"/events/{event['uid']}/tickets/tier").status_code == 200
+
+
+@step("alice_auth", "org")
+def test_get_ticket_tier_for_an_event_with_none_is_404(c):
+    event = _tier_event(c, "tier-empty")
+    r = c.get(f"/events/{event['uid']}/tickets/tier")
+    assert r.status_code == 404, f"expected 404, got {r.status_code} {r.text}"
+
+
+@step()
+def test_get_ticket_tier_for_unknown_event_is_404(c):
+    r = c.get(f"/events/{uuid.uuid4()}/tickets/tier")
+    assert r.status_code == 404, f"expected 404, got {r.status_code} {r.text}"
+
+
+@step()
+def test_get_ticket_tier_with_malformed_event_uid_is_422(c):
+    r = c.get("/events/not-a-uuid/tickets/tier")
+    assert r.status_code == 422, f"expected 422, got {r.status_code} {r.text}"
+
+
+@step("alice_auth", "org")
+def test_get_ticket_tier_with_several_tiers(c):
+    """An event has many tiers, but the route is `fetchrow` + a singular
+    response_model, so it can only ever hand back one of them -- and which one
+    is whatever the scan reaches first, since there is no ORDER BY."""
+    event = _tier_event(c, "tier-many")
+    for name, price in (("general", "100.00"), ("gold", "500.00"), ("platinum", "900.00")):
+        w = c.put(
+            f"/events/{event['uid']}/tickets/tier",
+            json=_tier(name, price=price),
+            cookies=state["alice_auth"],
+        )
+        assert w.status_code == 200, w.text
+    r = c.get(f"/events/{event['uid']}/tickets/tier")
+    assert r.status_code == 200, r.text
+    assert r.json()["event_uid"] == event["uid"], r.json()
+    assert r.json()["name"] in {"general", "gold", "platinum"}, r.json()
 
 
 def main():
