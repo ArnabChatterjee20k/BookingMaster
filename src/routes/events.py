@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, status, Query
 from datetime import datetime, timezone, timedelta
+from decimal import Decimal
 from typing import Annotated, Self
 from uuid import UUID, uuid4
 from asyncpg import Record
@@ -68,6 +69,18 @@ class EventListRequest(BaseModel):
 
 class EventListResponse(BaseModel):
     events: list[EventResponseWithVenueInfo]
+
+class TicketsTierRequest(BaseModel):
+    name: str
+    price: Decimal = Field(ge=0, max_digits=12, decimal_places=2)
+    available: int
+
+
+class TicketTierResponse(Base):
+    name: str
+    price: Decimal
+    event_uid: UUID
+    available: int
 
 @router.post("/events", response_model=EventResponse)
 async def create_event(db: DBSession, event: EventCreateRequest, user: CurrentUser):
@@ -181,6 +194,44 @@ async def list_events(db: DBSession, filters: Annotated[EventListRequest, Query(
         ]
     )
 
-@router.post("/events/{uid}/tickets")
-def create_tickets():
-    pass
+# upsert
+@router.put("/events/{uid}/tickets/tier", response_model=TicketTierResponse)
+async def create_ticket_tiers(uid: UUID, ticket_tier:TicketsTierRequest, db: DBSession, user: CurrentUser):
+    event: Record = await db.fetchrow("select org_uid, starts_at, ends_at from events where uid=$1 limit 1", uid)
+    if not event:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "event not found")
+    
+    if await get_role(db, event.get("org_uid"), user.uid) != MemberRole.OWNER:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "Not a owner. Owner can only create tickets tier"
+        )
+
+    # unique index on (event_uid, name)
+    ticket_tier: Record = await db.fetchrow(
+                            """
+                            insert INTO tickets_tier
+                                (uid, name, event_uid, price, available)
+                            values
+                                ($1, $2, $3, $4, $5)
+                            on conflict (event_uid, name)
+                            do update set
+                                price = excluded.price,
+                                available = excluded.available,
+                                updated_at = now()
+                            returning *
+                            """,
+                            uuid4(),
+                            ticket_tier.name,
+                            uid,
+                            ticket_tier.price,
+                            ticket_tier.available
+                        )
+
+    return TicketTierResponse(**ticket_tier)
+
+@router.get("/events/{uid}/tickets/tier", response_model=TicketTierResponse)
+async def get_ticket_tiers(uid: UUID, db: DBSession):
+    tier: Record | None = await db.fetchrow("select * from tickets_tier where event_uid=$1", uid)
+    if not tier:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Event not found")
+    return TicketTierResponse(**tier)
