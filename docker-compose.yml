@@ -18,5 +18,17 @@ services:
       timeout: 5s
       retries: 10
 
+  # appwrite-embedding:
+  #   image: appwrite/embedding:0.1.0
+  #   environment:
+  #     EMBEDDING_MODELS: "BAAI/bge-small-en-v1.5" # 384 dimension
+  #   container_name: appwrite-embedding
+  #   restart: unless-stopped
+  #   volumes:
+  #     - appwrite-models:/home/embedder/models
+  #   networks:
+  #     - appwrite
+
 volumes:
   postgres_data:
+  appwrite-models: null
