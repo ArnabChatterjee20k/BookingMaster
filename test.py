@@ -1247,8 +1247,8 @@ def test_listing_shows_events_past_the_horizon(c):
 # --------------------------------------------------------------- ticket tiers
 
 
-def _tier(name="gold", price="750.50", available=100):
-    return {"name": name, "price": price, "available": available}
+def _tier(name="gold", price="750.50", capacity=100):
+    return {"name": name, "price": price, "capacity": capacity}
 
 
 def _tier_event(c, label):
@@ -1272,6 +1272,8 @@ def test_owner_creates_ticket_tier(c):
     body = r.json()
     assert body["name"] == "gold", body
     assert body["event_uid"] == event["uid"], body
+    assert body["capacity"] == 100, body
+    # nothing materialised yet, so the whole capacity is still un-materialised
     assert body["available"] == 100, body
     state["tier_event"] = event
 
@@ -1282,15 +1284,16 @@ def test_tier_upsert_updates_in_place(c):
     index, not add a second tier."""
     url = f"/events/{state['tier_event']['uid']}/tickets/tier"
     first = c.put(
-        url, json=_tier(price="750.50", available=100), cookies=state["alice_auth"]
+        url, json=_tier(price="750.50", capacity=100), cookies=state["alice_auth"]
     ).json()
     second = c.put(
-        url, json=_tier(price="999.99", available=40), cookies=state["alice_auth"]
+        url, json=_tier(price="999.99", capacity=40), cookies=state["alice_auth"]
     )
     assert second.status_code == 200, second.text
     body = second.json()
     assert body["uid"] == first["uid"], "the upsert inserted a new row"
     assert body["price"] == "999.99", body
+    assert body["capacity"] == 40, body
     assert body["available"] == 40, body
     assert (
         body["updated_at"] > first["updated_at"]
@@ -1396,7 +1399,7 @@ def test_ticket_tier_rejects_malformed_body(c):
     event = _tier_event(c, "tier-malformed")
     r = c.put(
         f"/events/{event['uid']}/tickets/tier",
-        json={"name": "gold"},  # no price, no available
+        json={"name": "gold"},  # no price, no capacity
         cookies=state["alice_auth"],
     )
     assert r.status_code == 422, f"expected 422, got {r.status_code} {r.text}"
@@ -1407,7 +1410,7 @@ def test_get_ticket_tier_returns_a_tier_for_that_event(c):
     event = _tier_event(c, "tier-read")
     written = c.put(
         f"/events/{event['uid']}/tickets/tier",
-        json=_tier("general", price="100.00", available=25),
+        json=_tier("general", price="100.00", capacity=25),
         cookies=state["alice_auth"],
     )
     assert written.status_code == 200, written.text
@@ -1417,6 +1420,7 @@ def test_get_ticket_tier_returns_a_tier_for_that_event(c):
     assert body["event_uid"] == event["uid"], body
     assert body["uid"] == written.json()["uid"], body
     assert body["price"] == "100.00", body
+    assert body["capacity"] == 25, body
     assert body["available"] == 25, body
 
 
@@ -1468,6 +1472,58 @@ def test_get_ticket_tier_with_several_tiers(c):
     assert r.status_code == 200, r.text
     assert r.json()["event_uid"] == event["uid"], r.json()
     assert r.json()["name"] in {"general", "gold", "platinum"}, r.json()
+
+
+def _materialise(tier_uid, n):
+    """Pretend n units have been pulled out of the un-materialised pool, the way
+    replenishment will once bookings exist. Goes straight to the database
+    because no route does this yet."""
+
+    async def go():
+        conn = await asyncpg.connect(Config.db_uri)
+        await conn.execute(
+            "update tickets_tier set available = available - $1 where uid = $2", n, tier_uid
+        )
+        await conn.close()
+
+    asyncio.run(go())
+
+
+@step("alice_auth", "org")
+def test_capacity_change_keeps_what_is_already_materialised(c):
+    """available is capacity minus what has been turned into ticket rows, so a
+    capacity edit has to move only the un-materialised remainder."""
+    url = f"/events/{_tier_event(c, 'tier-capacity')['uid']}/tickets/tier"
+    created = c.put(url, json=_tier("gold", capacity=100), cookies=state["alice_auth"])
+    assert created.status_code == 200, created.text
+    _materialise(created.json()["uid"], 30)  # 30 of the 100 now exist as rows
+
+    raised = c.put(url, json=_tier("gold", capacity=150), cookies=state["alice_auth"])
+    assert raised.status_code == 200, raised.text
+    assert raised.json()["capacity"] == 150, raised.json()
+    assert (
+        raised.json()["available"] == 120
+    ), f"expected 150 - 30 materialised = 120, got {raised.json()['available']}"
+
+    lowered = c.put(url, json=_tier("gold", capacity=40), cookies=state["alice_auth"])
+    assert lowered.status_code == 200, lowered.text
+    assert lowered.json()["available"] == 10, lowered.json()
+
+
+@step("alice_auth", "org")
+def test_capacity_cannot_drop_below_what_is_materialised(c):
+    """Shrinking past the rows that already exist would strand live tickets, so
+    the route refuses it before the upsert runs."""
+    url = f"/events/{_tier_event(c, 'tier-shrink')['uid']}/tickets/tier"
+    created = c.put(url, json=_tier("gold", capacity=100), cookies=state["alice_auth"])
+    assert created.status_code == 200, created.text
+    _materialise(created.json()["uid"], 60)
+
+    r = c.put(url, json=_tier("gold", capacity=50), cookies=state["alice_auth"])
+    assert (
+        r.status_code == 409
+    ), f"expected 409, got {r.status_code} {r.text}"
+    assert "60" in r.json()["detail"], r.json()
 
 
 def main():

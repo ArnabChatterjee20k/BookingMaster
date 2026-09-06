@@ -119,6 +119,7 @@ async def load_schemas():
             name varchar(64) not null,
             event_uid uuid not null,
             price numeric(12, 2) default 0.00,
+            capacity integer not null,
             available integer not null
         )
     """)
@@ -142,6 +143,9 @@ async def load_schemas():
     """)
 
     # tickets
+    # not referencing ticket_tier_uid as the ticket_tier is rarely going to change
+    # and having the name can save lookups a lot to other tables
+    # not doing for events as the details might change
     await conn.execute("""
         create table if not exists tickets (
             id serial primary key,
@@ -150,7 +154,7 @@ async def load_schemas():
             updated_at timestamptz default now(),
             event_uid uuid not null,
             booking_uid uuid not null,
-            ticket_tier_uid uuid not null,
+            ticket_tier_name varchar(64) not null,
             status varchar(16) not null
         )
     """)

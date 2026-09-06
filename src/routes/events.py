@@ -73,13 +73,14 @@ class EventListResponse(BaseModel):
 class TicketsTierRequest(BaseModel):
     name: str
     price: Decimal = Field(ge=0, max_digits=12, decimal_places=2)
-    available: int
+    capacity: int = Field(ge=0)
 
 
 class TicketTierResponse(Base):
     name: str
     price: Decimal
     event_uid: UUID
+    capacity: int
     available: int
 
 @router.post("/events", response_model=EventResponse)
@@ -99,8 +100,8 @@ async def create_event(db: DBSession, event: EventCreateRequest, user: CurrentUs
                     select id
                     from events
                     where venue_uid = $1
-                    and starts_at BETWEEN $2 - interval '2 days'
-                                        AND $2 + interval '2 days'
+                    and starts_at BETWEEN $2::timestamptz - interval '2 days'
+                                        AND $2::timestamptz + interval '2 days'
                     limit 1
                     """,
                     event.venue_uid,
@@ -206,26 +207,48 @@ async def create_ticket_tiers(uid: UUID, ticket_tier:TicketsTierRequest, db: DBS
             status.HTTP_403_FORBIDDEN, "Not a owner. Owner can only create tickets tier"
         )
 
-    # unique index on (event_uid, name)
-    ticket_tier: Record = await db.fetchrow(
-                            """
-                            insert INTO tickets_tier
-                                (uid, name, event_uid, price, available)
-                            values
-                                ($1, $2, $3, $4, $5)
-                            on conflict (event_uid, name)
-                            do update set
-                                price = excluded.price,
-                                available = excluded.available,
-                                updated_at = now()
-                            returning *
-                            """,
-                            uuid4(),
-                            ticket_tier.name,
-                            uid,
-                            ticket_tier.price,
-                            ticket_tier.available
-                        )
+    async with db.transaction():
+        existing: Record | None = await db.fetchrow(
+            "select capacity, available from tickets_tier"
+            " where event_uid=$1 and name=$2 for update",
+            uid,
+            ticket_tier.name,
+        )
+        if existing:
+            materialised = existing["capacity"] - existing["available"]
+            if ticket_tier.capacity < materialised:
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    f"{materialised} tickets already exist for this tier;"
+                    f" capacity cannot go below that",
+                )
+
+        # unique index on (event_uid, name)
+        ticket_tier: Record = await db.fetchrow(
+                                """
+                                insert INTO tickets_tier
+                                    (uid, name, event_uid, price, capacity, available)
+                                values
+                                    ($1, $2, $3, $4, $5, $5)
+                                on conflict (event_uid, name)
+                                do update set
+                                    price = excluded.price,
+                                    capacity = excluded.capacity,
+                                    -- every right-hand side reads the OLD row, so
+                                    -- this is new_capacity minus what is already
+                                    -- materialised. Rows in the pool are untouched;
+                                    -- only the un-materialised remainder moves.
+                                    available = excluded.capacity
+                                                - (tickets_tier.capacity - tickets_tier.available),
+                                    updated_at = now()
+                                returning *
+                                """,
+                                uuid4(),
+                                ticket_tier.name,
+                                uid,
+                                ticket_tier.price,
+                                ticket_tier.capacity,
+                            )
 
     return TicketTierResponse(**ticket_tier)
 
@@ -235,3 +258,5 @@ async def get_ticket_tiers(uid: UUID, db: DBSession):
     if not tier:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Event not found")
     return TicketTierResponse(**tier)
+
+# not adding the delete ticket tier for now as its not going to get used a lot
