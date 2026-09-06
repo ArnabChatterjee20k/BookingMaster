@@ -173,7 +173,7 @@ async def update_member_role(
             status.HTTP_403_FORBIDDEN, "Not a owner. Owner can only remove members"
         )
     await db.execute(
-        "update memberships set role=$1 where user_uid=$2 and org_uid=$3",
+        "update memberships set role=$1, updated_at=now() where user_uid=$2 and org_uid=$3",
         member.role,
         member_uid,
         uid,
