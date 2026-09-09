@@ -51,3 +51,15 @@ class User(Base):
 class MemberRole(StrEnum):
     OWNER = "owner"
     MEMBER = "member"
+
+class TicketStatus(StrEnum):
+    AVAILABLE = "available"
+    BOOKED = "booked"
+
+
+class BookingStatus(StrEnum):
+    # a hold: the tickets are off the market but not paid for. `expires_at` is
+    # when a sweeper may hand them back.
+    PENDING = "pending"
+    CONFIRMED = "confirmed"
+    CANCELLED = "cancelled"

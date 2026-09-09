@@ -138,9 +138,16 @@ async def load_schemas():
             amount numeric(12, 2) default 0.00,
             status varchar(16) not null,
             event_uid uuid not null,
+            user_uid uuid not null,
             expires_at timestamptz not null
         )
     """)
+    # serves "list my bookings for this event"; lookups by booking uid already
+    # have bookings_uid_key from the unique constraint
+    await conn.execute(
+        "create index if not exists bookings_event_uid_user_uid_idx"
+        " on bookings(event_uid, user_uid);"
+    )
 
     # tickets
     # not referencing ticket_tier_uid as the ticket_tier is rarely going to change
@@ -153,10 +160,15 @@ async def load_schemas():
             created_at timestamptz default now(),
             updated_at timestamptz default now(),
             event_uid uuid not null,
-            booking_uid uuid not null,
+            booking_uid uuid,
             ticket_tier_name varchar(64) not null,
             status varchar(16) not null
         )
     """)
+
+    await conn.execute(
+        "create index if not exists tickets_event_uid_tier_status"
+        " on tickets(event_uid, ticket_tier_name, status);"
+    )
 
     await conn.close()

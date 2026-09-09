@@ -125,8 +125,6 @@ async def create_event(db: DBSession, event: EventCreateRequest, user: CurrentUs
             event.ends_at,
         )
 
-    if row is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "venue not found")
     return EventResponse(**row)
 
 

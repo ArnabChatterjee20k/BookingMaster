@@ -14,7 +14,7 @@ from .routes.bookings import router as bookings_router
 def create_api():
     @asynccontextmanager
     async def lifecycle(app):
-        # await load_schemas()
+        await load_schemas()
         yield
 
     app = FastAPI(lifespan=lifecycle)
