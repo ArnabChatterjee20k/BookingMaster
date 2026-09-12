@@ -12,6 +12,7 @@ Tables are truncated at startup so re-runs are deterministic.
 
 import asyncio
 import uuid
+from decimal import Decimal
 
 import asyncpg
 from fastapi.testclient import TestClient
@@ -1101,7 +1102,9 @@ def test_second_event_at_the_same_venue_is_409(c):
         json=_event_body(venue["uid"], "clash", starts_in_hours=96),
         cookies=state["alice_auth"],
     )
-    assert clash.status_code == 409, f"expected 409, got {clash.status_code} {clash.text}"
+    assert (
+        clash.status_code == 409
+    ), f"expected 409, got {clash.status_code} {clash.text}"
 
 
 @step("alice_auth", "org")
@@ -1140,13 +1143,17 @@ def test_event_outside_the_gap_is_allowed(c):
         json=_event_body(venue["uid"], "later", starts_in_hours=48 + 72),
         cookies=state["alice_auth"],
     )
-    assert later.status_code == 200, f"expected 200, got {later.status_code} {later.text}"
+    assert (
+        later.status_code == 200
+    ), f"expected 200, got {later.status_code} {later.text}"
 
 
 @step("alice_auth", "org")
 def test_gap_is_scoped_to_one_venue(c):
     """Two venues can hold events at the same instant."""
-    hall_a, hall_b = _make_venue(c, _unique("hall-a")), _make_venue(c, _unique("hall-b"))
+    hall_a, hall_b = _make_venue(c, _unique("hall-a")), _make_venue(
+        c, _unique("hall-b")
+    )
     at = 24 * 20
     first = c.post(
         "/events",
@@ -1267,7 +1274,11 @@ def _tier_event(c, label):
 @step("alice_auth", "org")
 def test_owner_creates_ticket_tier(c):
     event = _tier_event(c, "tier-create")
-    r = c.put(f"/events/{event['uid']}/tickets/tier", json=_tier(), cookies=state["alice_auth"])
+    r = c.put(
+        f"/events/{event['uid']}/tickets/tier",
+        json=_tier(),
+        cookies=state["alice_auth"],
+    )
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["name"] == "gold", body
@@ -1359,9 +1370,9 @@ def test_tier_ignores_an_event_uid_in_the_body(c):
         cookies=state["alice_auth"],
     )
     assert r.status_code == 200, r.text
-    assert r.json()["event_uid"] == mine["uid"], (
-        f"the body won: wrote to {r.json()['event_uid']}, expected {mine['uid']}"
-    )
+    assert (
+        r.json()["event_uid"] == mine["uid"]
+    ), f"the body won: wrote to {r.json()['event_uid']}, expected {mine['uid']}"
 
 
 @step("bob_auth", "tier_event")
@@ -1376,21 +1387,27 @@ def test_non_owner_cannot_create_ticket_tier(c):
 
 @step("tier_event")
 def test_anonymous_cannot_create_ticket_tier(c):
-    r = c.put(f"/events/{state['tier_event']['uid']}/tickets/tier", json=_tier("anon-tier"))
+    r = c.put(
+        f"/events/{state['tier_event']['uid']}/tickets/tier", json=_tier("anon-tier")
+    )
     assert r.status_code == 401, f"expected 401, got {r.status_code} {r.text}"
 
 
 @step("alice_auth")
 def test_ticket_tier_on_unknown_event_is_404(c):
     r = c.put(
-        f"/events/{uuid.uuid4()}/tickets/tier", json=_tier(), cookies=state["alice_auth"]
+        f"/events/{uuid.uuid4()}/tickets/tier",
+        json=_tier(),
+        cookies=state["alice_auth"],
     )
     assert r.status_code == 404, f"expected 404, got {r.status_code} {r.text}"
 
 
 @step("alice_auth")
 def test_ticket_tier_with_malformed_event_uid_is_422(c):
-    r = c.put("/events/not-a-uuid/tickets/tier", json=_tier(), cookies=state["alice_auth"])
+    r = c.put(
+        "/events/not-a-uuid/tickets/tier", json=_tier(), cookies=state["alice_auth"]
+    )
     assert r.status_code == 422, f"expected 422, got {r.status_code} {r.text}"
 
 
@@ -1461,7 +1478,11 @@ def test_get_ticket_tier_with_several_tiers(c):
     response_model, so it can only ever hand back one of them -- and which one
     is whatever the scan reaches first, since there is no ORDER BY."""
     event = _tier_event(c, "tier-many")
-    for name, price in (("general", "100.00"), ("gold", "500.00"), ("platinum", "900.00")):
+    for name, price in (
+        ("general", "100.00"),
+        ("gold", "500.00"),
+        ("platinum", "900.00"),
+    ):
         w = c.put(
             f"/events/{event['uid']}/tickets/tier",
             json=_tier(name, price=price),
@@ -1482,7 +1503,9 @@ def _materialise(tier_uid, n):
     async def go():
         conn = await asyncpg.connect(Config.db_uri)
         await conn.execute(
-            "update tickets_tier set available = available - $1 where uid = $2", n, tier_uid
+            "update tickets_tier set available = available - $1 where uid = $2",
+            n,
+            tier_uid,
         )
         await conn.close()
 
@@ -1520,10 +1543,264 @@ def test_capacity_cannot_drop_below_what_is_materialised(c):
     _materialise(created.json()["uid"], 60)
 
     r = c.put(url, json=_tier("gold", capacity=50), cookies=state["alice_auth"])
-    assert (
-        r.status_code == 409
-    ), f"expected 409, got {r.status_code} {r.text}"
+    assert r.status_code == 409, f"expected 409, got {r.status_code} {r.text}"
     assert "60" in r.json()["detail"], r.json()
+
+
+# ------------------------------------------------------------------- bookings
+
+
+def _booking_event(c, label, tiers=(("gold", "750.50", 100),)):
+    """An event owned by alice with the given tiers already created."""
+    event = _tier_event(c, label)
+    for name, price, capacity in tiers:
+        r = c.put(
+            f"/events/{event['uid']}/tickets/tier",
+            json=_tier(name, price=price, capacity=capacity),
+            cookies=state["alice_auth"],
+        )
+        assert r.status_code == 200, r.text
+    return event
+
+
+def _book(c, event_uid, tickets, auth=None, booking_uid=None):
+    return c.post(
+        f"/events/{event_uid}/bookings",
+        json={
+            "booking_uid": str(booking_uid or uuid.uuid4()),
+            "tickets": [{"tier_name": n, "quantity": q} for n, q in tickets],
+        },
+        cookies=auth or state["alice_auth"],
+    )
+
+
+def _inventory(event_uid, tier_name):
+    """(capacity, available, materialised, booked) straight from the database."""
+
+    async def go():
+        conn = await asyncpg.connect(Config.db_uri)
+        tier = await conn.fetchrow(
+            "select capacity, available from tickets_tier"
+            " where event_uid=$1 and name=$2",
+            uuid.UUID(event_uid),
+            tier_name,
+        )
+        rows = await conn.fetch(
+            "select status, count(*) as n from tickets"
+            " where event_uid=$1 and ticket_tier_name=$2 group by status",
+            uuid.UUID(event_uid),
+            tier_name,
+        )
+        await conn.close()
+        by_status = {r["status"]: r["n"] for r in rows}
+        return (
+            tier["capacity"],
+            tier["available"],
+            sum(by_status.values()),
+            by_status.get("booked", 0),
+        )
+
+    return asyncio.run(go())
+
+
+@step("alice_auth", "org")
+def test_booking_materialises_from_an_empty_pool(c):
+    """Nothing is materialised up front, so the first booking has to take the
+    replenish path: draw from tickets_tier.available and create the rows."""
+    event = _booking_event(c, "book-first")
+    assert _inventory(event["uid"], "gold")[2] == 0, "pool should start empty"
+
+    r = _book(c, event["uid"], [("gold", 2)])
+    assert r.status_code == 201, f"expected 201, got {r.status_code} {r.text}"
+    body = r.json()
+    assert body["status"] == "pending", body
+    assert len(body["tickets"]) == 2, body
+    assert all(t["status"] == "booked" for t in body["tickets"]), body["tickets"]
+    assert body["expires_at"], "a hold with no expiry can never be swept"
+
+    capacity, available, materialised, booked = _inventory(event["uid"], "gold")
+    assert booked == 2, f"expected 2 booked rows, got {booked}"
+    assert (
+        capacity - available == materialised
+    ), f"{capacity} - {available} != {materialised} materialised"
+    state["booking"] = body
+    state["booking_event"] = event
+
+
+@step("alice_auth", "org")
+def test_booking_amount_is_price_times_quantity(c):
+    """The amount comes from tickets_tier.price, which is why the tier lookup
+    fetches price instead of only validating the name."""
+    event = _booking_event(
+        c, "book-amount", tiers=(("gold", "750.50", 100), ("silver", "100.25", 100))
+    )
+    r = _book(c, event["uid"], [("gold", 2), ("silver", 3)])
+    assert r.status_code == 201, r.text
+    expected = Decimal("750.50") * 2 + Decimal("100.25") * 3
+    assert (
+        Decimal(r.json()["amount"]) == expected
+    ), f"expected {expected}, got {r.json()['amount']}"
+    assert len(r.json()["tickets"]) == 5, r.json()["tickets"]
+
+
+@step("alice_auth", "org")
+def test_repeated_tier_in_one_request_is_merged(c):
+    """skip locked does not skip our own locks, so a duplicated tier would
+    otherwise be handed the same rows twice and report double what exists."""
+    event = _booking_event(c, "book-dupe")
+    r = _book(c, event["uid"], [("gold", 2), ("gold", 3)])
+    assert r.status_code == 201, r.text
+    ids = [t["uid"] for t in r.json()["tickets"]]
+    assert len(ids) == 5, f"expected 5 tickets, got {len(ids)}"
+    assert len(set(ids)) == 5, f"the same ticket was handed out twice: {ids}"
+    assert _inventory(event["uid"], "gold")[3] == 5
+
+
+@step("alice_auth", "org")
+def test_replaying_a_booking_uid_returns_the_same_booking(c):
+    """The client supplies booking_uid so a retried request is idempotent -- a
+    second hold on top of the first would strand inventory."""
+    event = _booking_event(c, "book-idem")
+    booking_uid = uuid.uuid4()
+
+    first = _book(c, event["uid"], [("gold", 2)], booking_uid=booking_uid)
+    assert first.status_code == 201, first.text
+    second = _book(c, event["uid"], [("gold", 2)], booking_uid=booking_uid)
+    assert second.status_code in (200, 201), second.text
+
+    assert second.json()["uid"] == first.json()["uid"], "replay created a new booking"
+    booked = _inventory(event["uid"], "gold")[3]
+    assert booked == 2, f"replay held a second batch: {booked} tickets booked"
+
+
+@step("alice_auth", "org")
+def test_booking_more_than_capacity_is_409(c):
+    event = _booking_event(c, "book-soldout", tiers=(("gold", "10.00", 2),))
+    r = _book(c, event["uid"], [("gold", 5)])
+    assert r.status_code == 409, f"expected 409, got {r.status_code} {r.text}"
+    assert "gold" in r.json()["detail"], r.json()
+    _, available, _, booked = _inventory(event["uid"], "gold")
+    assert booked == 0, "a failed booking left tickets claimed"
+    assert available == 2, f"a failed booking drew down capacity: available={available}"
+
+
+@step("alice_auth", "org")
+def test_booking_an_unknown_tier_is_400_and_names_it(c):
+    event = _booking_event(c, "book-badtier")
+    r = _book(c, event["uid"], [("gold", 1), ("platinum", 1)])
+    assert r.status_code == 400, f"expected 400, got {r.status_code} {r.text}"
+    assert "platinum" in r.json()["detail"], r.json()
+
+
+@step("alice_auth")
+def test_booking_an_unknown_event_is_404(c):
+    r = _book(c, str(uuid.uuid4()), [("gold", 1)])
+    assert r.status_code == 404, f"expected 404, got {r.status_code} {r.text}"
+
+
+@step("booking_event")
+def test_anonymous_cannot_book(c):
+    r = c.post(
+        f"/events/{state['booking_event']['uid']}/bookings",
+        json={
+            "booking_uid": str(uuid.uuid4()),
+            "tickets": [{"tier_name": "gold", "quantity": 1}],
+        },
+    )
+    assert r.status_code == 401, f"expected 401, got {r.status_code} {r.text}"
+
+
+@step("alice_auth", "booking_event")
+def test_zero_quantity_is_rejected_before_any_query(c):
+    r = _book(c, state["booking_event"]["uid"], [("gold", 0)])
+    assert r.status_code == 422, f"expected 422, got {r.status_code} {r.text}"
+
+
+@step("alice_auth", "alice", "booking")
+def test_get_booking_returns_it_with_tickets(c):
+    r = c.get(f"/bookings/{state['booking']['uid']}", cookies=state["alice_auth"])
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["uid"] == state["booking"]["uid"], body
+    assert len(body["tickets"]) == len(state["booking"]["tickets"]), body
+    assert body["user_uid"] == state["alice"]["uid"], body
+
+
+@step("bob_auth", "booking")
+def test_get_someone_elses_booking_is_404(c):
+    """Scoped by user_uid, so a leaked booking uid is not enough to read it."""
+    r = c.get(f"/bookings/{state['booking']['uid']}", cookies=state["bob_auth"])
+    assert (
+        r.status_code == 404
+    ), f"expected 404 (no existence leak), got {r.status_code}"
+
+
+@step("alice_auth")
+def test_get_unknown_booking_is_404(c):
+    r = c.get(f"/bookings/{uuid.uuid4()}", cookies=state["alice_auth"])
+    assert r.status_code == 404, f"expected 404, got {r.status_code} {r.text}"
+
+
+@step("alice_auth", "bob_auth", "org")
+def test_list_bookings_is_scoped_to_the_caller(c):
+    event = _booking_event(c, "book-list", tiers=(("gold", "10.00", 100),))
+    mine = [_book(c, event["uid"], [("gold", 1)]).json()["uid"] for _ in range(3)]
+    theirs = _book(c, event["uid"], [("gold", 1)], auth=state["bob_auth"])
+    assert theirs.status_code == 201, theirs.text
+
+    r = c.get(f"/events/{event['uid']}/bookings", cookies=state["alice_auth"])
+    assert r.status_code == 200, r.text
+    seen = [b["uid"] for b in r.json()["bookings"]]
+    assert sorted(seen) == sorted(mine), f"expected {mine}, saw {seen}"
+    assert (
+        theirs.json()["uid"] not in seen
+    ), "another user's booking leaked into the list"
+
+
+@step("alice_auth", "org")
+def test_list_bookings_paginates_without_repeats(c):
+    event = _booking_event(c, "book-page", tiers=(("gold", "10.00", 100),))
+    created = {_book(c, event["uid"], [("gold", 1)]).json()["uid"] for _ in range(5)}
+
+    seen, after, pages = [], 0, 0
+    while True:
+        r = c.get(
+            f"/events/{event['uid']}/bookings",
+            params={"after": after, "limit": 2},
+            cookies=state["alice_auth"],
+        )
+        assert r.status_code == 200, r.text
+        page = r.json()["bookings"]
+        seen.extend(b["uid"] for b in page)
+        pages += 1
+        assert pages < 20, "cursor never terminated -- pagination is looping"
+        if len(page) < 2:
+            break
+        after = page[-1]["id"]
+
+    assert len(seen) == len(set(seen)), f"duplicate bookings across pages: {seen}"
+    assert set(seen) == created, f"expected {created}, saw {set(seen)}"
+
+
+@step("alice_auth", "org")
+def test_second_booking_reuses_the_pool_without_replenishing(c):
+    """The first booking materialises a whole chunk; the second should be served
+    from those rows rather than drawing down capacity again."""
+    event = _booking_event(c, "book-reuse", tiers=(("gold", "10.00", 500),))
+    _book(c, event["uid"], [("gold", 1)])
+    _, available_after_first, materialised_after_first, _ = _inventory(
+        event["uid"], "gold"
+    )
+
+    _book(c, event["uid"], [("gold", 1)])
+    _, available, materialised, booked = _inventory(event["uid"], "gold")
+
+    assert booked == 2, f"expected 2 booked, got {booked}"
+    assert available == available_after_first, (
+        f"second booking drew from capacity again: "
+        f"{available_after_first} -> {available}"
+    )
+    assert materialised == materialised_after_first, "pool grew unnecessarily"
 
 
 def main():
