@@ -52,6 +52,7 @@ class MemberRole(StrEnum):
     OWNER = "owner"
     MEMBER = "member"
 
+
 class TicketStatus(StrEnum):
     AVAILABLE = "available"
     BOOKED = "booked"

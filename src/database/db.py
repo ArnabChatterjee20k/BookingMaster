@@ -26,7 +26,9 @@ async def load_schemas():
     await conn.execute("create extension if not exists postgis")
 
     # string collation for case insensitive matching
-    await conn.execute("CREATE COLLATION IF NOT EXISTS utf8_ci_ai ( provider = icu, locale = 'und-u-ks-level1', deterministic = false )")
+    await conn.execute(
+        "CREATE COLLATION IF NOT EXISTS utf8_ci_ai ( provider = icu, locale = 'und-u-ks-level1', deterministic = false )"
+    )
 
     # users
     await conn.execute("""
@@ -132,14 +134,15 @@ async def load_schemas():
     await conn.execute("""
         create table if not exists bookings (
             id serial primary key,
-            uid uuid unique not null,
+            uid uuid not null,
             created_at timestamptz default now(),
             updated_at timestamptz default now(),
             amount numeric(12, 2) default 0.00,
             status varchar(16) not null,
             event_uid uuid not null,
             user_uid uuid not null,
-            expires_at timestamptz not null
+            expires_at timestamptz not null,
+            unique(uid, event_uid, user_uid)
         )
     """)
     # serves "list my bookings for this event"; lookups by booking uid already

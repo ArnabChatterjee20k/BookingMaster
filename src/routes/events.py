@@ -70,6 +70,7 @@ class EventListRequest(BaseModel):
 class EventListResponse(BaseModel):
     events: list[EventResponseWithVenueInfo]
 
+
 class TicketsTierRequest(BaseModel):
     name: str
     price: Decimal = Field(ge=0, max_digits=12, decimal_places=2)
@@ -83,6 +84,7 @@ class TicketTierResponse(Base):
     capacity: int
     available: int
 
+
 @router.post("/events", response_model=EventResponse)
 async def create_event(db: DBSession, event: EventCreateRequest, user: CurrentUser):
     if await get_role(db, event.org_uid, user.uid) != MemberRole.OWNER:
@@ -90,13 +92,17 @@ async def create_event(db: DBSession, event: EventCreateRequest, user: CurrentUs
             status.HTTP_403_FORBIDDEN, "Not a owner. Owner can only create event"
         )
     async with db.transaction():
-        venue: Record | None = await db.fetchrow("""select 1 from venues where uid=$1 and org_uid=$2 for update""", event.venue_uid, event.org_uid)
+        venue: Record | None = await db.fetchrow(
+            """select 1 from venues where uid=$1 and org_uid=$2 for update""",
+            event.venue_uid,
+            event.org_uid,
+        )
         if not venue:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "venue not found")
 
         # check any events scheduled on a venue id or not. atleast 2days gap
         row: Record | None = await db.fetchrow(
-                    """
+            """
                     select id
                     from events
                     where venue_uid = $1
@@ -104,11 +110,14 @@ async def create_event(db: DBSession, event: EventCreateRequest, user: CurrentUs
                                         AND $2::timestamptz + interval '2 days'
                     limit 1
                     """,
-                    event.venue_uid,
-                    event.starts_at,
-                )
+            event.venue_uid,
+            event.starts_at,
+        )
         if row:
-            raise HTTPException(status.HTTP_409_CONFLICT, "venue already booked and should have a gap of atleast of 2days before start and after start")
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "venue already booked and should have a gap of atleast of 2days before start and after start",
+            )
 
         row: Record | None = await db.fetchrow(
             """
@@ -193,13 +202,18 @@ async def list_events(db: DBSession, filters: Annotated[EventListRequest, Query(
         ]
     )
 
+
 # upsert
 @router.put("/events/{uid}/tickets/tier", response_model=TicketTierResponse)
-async def create_ticket_tiers(uid: UUID, ticket_tier:TicketsTierRequest, db: DBSession, user: CurrentUser):
-    event: Record = await db.fetchrow("select org_uid, starts_at, ends_at from events where uid=$1 limit 1", uid)
+async def create_ticket_tiers(
+    uid: UUID, ticket_tier: TicketsTierRequest, db: DBSession, user: CurrentUser
+):
+    event: Record = await db.fetchrow(
+        "select org_uid, starts_at, ends_at from events where uid=$1 limit 1", uid
+    )
     if not event:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "event not found")
-    
+
     if await get_role(db, event.get("org_uid"), user.uid) != MemberRole.OWNER:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, "Not a owner. Owner can only create tickets tier"
@@ -223,7 +237,7 @@ async def create_ticket_tiers(uid: UUID, ticket_tier:TicketsTierRequest, db: DBS
 
         # unique index on (event_uid, name)
         ticket_tier: Record = await db.fetchrow(
-                                """
+            """
                                 insert INTO tickets_tier
                                     (uid, name, event_uid, price, capacity, available)
                                 values
@@ -241,20 +255,24 @@ async def create_ticket_tiers(uid: UUID, ticket_tier:TicketsTierRequest, db: DBS
                                     updated_at = now()
                                 returning *
                                 """,
-                                uuid4(),
-                                ticket_tier.name,
-                                uid,
-                                ticket_tier.price,
-                                ticket_tier.capacity,
-                            )
+            uuid4(),
+            ticket_tier.name,
+            uid,
+            ticket_tier.price,
+            ticket_tier.capacity,
+        )
 
     return TicketTierResponse(**ticket_tier)
 
+
 @router.get("/events/{uid}/tickets/tier", response_model=TicketTierResponse)
 async def get_ticket_tiers(uid: UUID, db: DBSession):
-    tier: Record | None = await db.fetchrow("select * from tickets_tier where event_uid=$1", uid)
+    tier: Record | None = await db.fetchrow(
+        "select * from tickets_tier where event_uid=$1", uid
+    )
     if not tier:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Event not found")
     return TicketTierResponse(**tier)
+
 
 # not adding the delete ticket tier for now as its not going to get used a lot
