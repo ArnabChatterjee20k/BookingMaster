@@ -149,7 +149,13 @@ async def load_schemas():
     # have bookings_uid_key from the unique constraint
     await conn.execute(
         "create index if not exists bookings_event_uid_user_uid_idx"
-        " on bookings(event_uid, user_uid);"
+        " on bookings(event_uid, user_uid, id);"
+    )
+    # serves "list all my bookings"; the event-leading index above cannot, since
+    # a btree is only seekable from its leading column
+    await conn.execute(
+        "create index if not exists bookings_user_uid_id_idx"
+        " on bookings(user_uid, id);"
     )
 
     # tickets
@@ -172,6 +178,13 @@ async def load_schemas():
     await conn.execute(
         "create index if not exists tickets_event_uid_tier_status"
         " on tickets(event_uid, ticket_tier_name, status);"
+    )
+
+    # the booking reads group tickets by booking_uid; without this every read
+    # is a seq scan of the whole tickets table
+    await conn.execute(
+        "create index if not exists tickets_booking_uid_idx"
+        " on tickets(booking_uid) where booking_uid is not null;"
     )
 
     await conn.close()

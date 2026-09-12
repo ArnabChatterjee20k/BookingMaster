@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 from uuid import UUID
@@ -30,7 +30,10 @@ class BookingCreateRequest(BaseModel):
 
     @model_validator(mode="after")
     def dedup_ticket_tiers(self) -> Self:
-        self.tickets = list(set(self.tickets))
+        merged: dict[str, int] = {}
+        for ticket in self.tickets:
+            merged[ticket.tier_name] = merged.get(ticket.tier_name, 0) + ticket.quantity
+        self.tickets = [Ticket(tier_name=n, quantity=q) for n, q in merged.items()]
         return self
 
 
@@ -40,7 +43,20 @@ class BookingResponse(BaseModel):
     amount: Decimal
 
 
+class BookingDetail(BookingResponse):
+    event_uid: UUID
+    status: BookingStatus
+    created_at: datetime
+    expires_at: datetime
+
+
+class BookingListResponse(BaseModel):
+    bookings: list[BookingDetail]
+    next: int | None = None
+
+
 POOL_SIZE = 100
+MAX_CURSOR = 2**31 - 1
 
 # using lateral query to iterate over tier columns which will help to reference each tier from the cte and apply limit for each
 # each tier matching with each tier via the cross join
@@ -101,6 +117,40 @@ take_lock_query = """
 claim_query = """
     update tickets set booking_uid=$1, status=$2, updated_at=now()
     where id = any($3::int[])
+"""
+
+booking_columns = """
+    id, uid, created_at, updated_at, event_uid, user_uid, amount, status, expires_at
+"""
+
+get_booking_query = f"""
+    select {booking_columns}
+    from bookings
+    where uid = $1 and user_uid = $2
+"""
+
+list_bookings_query = f"""
+    select {booking_columns}
+    from bookings
+    where user_uid = $1 and id < $2
+    order by id desc
+    limit $3
+"""
+
+list_bookings_of_event_query = f"""
+    select {booking_columns}
+    from bookings
+    where event_uid = $1 and user_uid = $2 and id < $3
+    order by id desc
+    limit $4
+"""
+
+# one round trip for every booking on the page instead of one per booking
+booking_tickets_query = """
+    select booking_uid, ticket_tier_name, count(*) as quantity
+    from tickets
+    where booking_uid = any($1::uuid[])
+    group by booking_uid, ticket_tier_name
 """
 
 book_query = """
@@ -220,7 +270,7 @@ async def _rebook(
     )
 
 
-@router.post("/events/{uid}/bookings")
+@router.post("/events/{uid}/bookings", response_model=BookingResponse)
 async def create_booking(
     uid: UUID, booking: BookingCreateRequest, db: DBSession, user: CurrentUser
 ):
@@ -316,3 +366,69 @@ async def create_booking(
             raise HTTPException(status.HTTP_409_CONFLICT, "Please try again later")
 
         return await _rebook(db, booking, uid, user, tier_prices, reserved_ids)
+
+
+async def _with_tickets(db: DBSession, rows: list[Record]) -> list[BookingDetail]:
+    if not rows:
+        return []
+
+    tickets: dict[UUID, list[Ticket]] = {row["uid"]: [] for row in rows}
+    grouped: list[Record] = await db.fetch(booking_tickets_query, list(tickets))
+    for row in grouped:
+        tickets[row["booking_uid"]].append(
+            Ticket(tier_name=row["ticket_tier_name"], quantity=row["quantity"])
+        )
+
+    return [
+        BookingDetail(
+            booking_uid=row["uid"],
+            amount=row["amount"],
+            event_uid=row["event_uid"],
+            status=row["status"],
+            created_at=row["created_at"],
+            expires_at=row["expires_at"],
+            tickets=sorted(tickets[row["uid"]], key=lambda ticket: ticket.tier_name),
+        )
+        for row in rows
+    ]
+
+
+@router.get("/bookings/{booking_uid}", response_model=BookingDetail)
+async def get_booking(booking_uid: UUID, db: DBSession, user: CurrentUser):
+    row: Record | None = await db.fetchrow(get_booking_query, booking_uid, user.uid)
+    if not row:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "booking not found")
+    return (await _with_tickets(db, [row]))[0]
+
+
+@router.get("/bookings", response_model=BookingListResponse)
+async def list_bookings(
+    db: DBSession,
+    user: CurrentUser,
+    after: int = Query(0, ge=0),
+    limit: int = Query(10, ge=1, le=100),
+):
+    rows: list[Record] = await db.fetch(
+        list_bookings_query, user.uid, after or MAX_CURSOR, limit
+    )
+    bookings = await _with_tickets(db, rows)
+    return BookingListResponse(
+        bookings=bookings, next=rows[-1]["id"] if len(rows) == limit else None
+    )
+
+
+@router.get("/events/{uid}/bookings", response_model=BookingListResponse)
+async def list_booking_of_event(
+    uid: UUID,
+    db: DBSession,
+    user: CurrentUser,
+    after: int = Query(0, ge=0),
+    limit: int = Query(10, ge=1, le=100),
+):
+    rows: list[Record] = await db.fetch(
+        list_bookings_of_event_query, uid, user.uid, after or MAX_CURSOR, limit
+    )
+    bookings = await _with_tickets(db, rows)
+    return BookingListResponse(
+        bookings=bookings, next=rows[-1]["id"] if len(rows) == limit else None
+    )
