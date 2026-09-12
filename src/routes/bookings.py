@@ -4,7 +4,7 @@ from decimal import Decimal
 from uuid import UUID
 from typing import Self
 from asyncpg import Record
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from ..auth.deps import CurrentUser
 from ..database.db import DBSession
@@ -17,7 +17,7 @@ router = APIRouter()
 
 class Ticket(BaseModel):
     tier_name: str
-    quantity: int
+    quantity: int = Field(gt=0)
 
 
 class ReservedTicket(Ticket):
