@@ -14,4 +14,6 @@ def get_value(key, default=None, throw=True):
 class Config:
     db_uri = get_value("DB_URI")
     jwt_secret = get_value("JWT_SECRET")
+    db_pool_min = int(get_value("DB_POOL_MIN", 10))
+    db_pool_max = int(get_value("DB_POOL_MAX", 20))
     auth_cookie_name = "eventmaster_token"

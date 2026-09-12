@@ -1,5 +1,5 @@
 import asyncpg
-from fastapi import Depends
+from fastapi import Depends, Request
 from typing import Annotated
 from ..config import Config
 
@@ -9,12 +9,18 @@ async def get_db():
     return conn
 
 
-async def get_db_session():
-    conn: asyncpg.Connection = await asyncpg.connect(Config.db_uri)
-    try:
+async def create_pool() -> asyncpg.Pool:
+    return await asyncpg.create_pool(
+        Config.db_uri,
+        min_size=Config.db_pool_min,
+        max_size=Config.db_pool_max,
+        server_settings={"application_name": "eventmaster-api"},
+    )
+
+
+async def get_db_session(request: Request):
+    async with request.app.state.pool.acquire() as conn:
         yield conn
-    finally:
-        await conn.close()
 
 
 DBSession = Annotated[asyncpg.Connection, Depends(get_db_session)]
