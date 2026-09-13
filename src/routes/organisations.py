@@ -8,6 +8,7 @@ from ..auth.deps import CurrentUser
 from ..database.db import DBSession
 from ..database.utils import get_role
 from ..database.models import Base, MemberRole
+from ..cache.cache import CacheSession
 
 router = APIRouter()
 
@@ -91,7 +92,12 @@ async def list_organisations(
 
 
 @router.get("/organisations/{uid}", response_model=OrganisationResponse)
-async def get_orginisation(uid: UUID, db: DBSession, user: CurrentUser):
+async def get_orginisation(
+    uid: UUID, db: DBSession, cache: CacheSession, user: CurrentUser
+):
+    cached_org = await cache.get(f"org:{uid}:{user.uid}", OrganisationResponse)
+    if cached_org:
+        return cached_org
     inner_join_query = """
         select o.*, m.role from organisations o
         join memberships m on m.org_uid = o.uid
@@ -103,15 +109,27 @@ async def get_orginisation(uid: UUID, db: DBSession, user: CurrentUser):
     org: Record = await db.fetchrow(inner_join_query, user.uid, uid)
     if not org:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "organisation not found")
-    return OrganisationResponse(**org)
+    response = OrganisationResponse(**org)
+    await cache.set(f"org:{uid}:{user.uid}", response)
+    return response
 
 
 @router.delete("/organisations/{uid}")
-async def delete_orginisation(uid: UUID, db: DBSession, user: CurrentUser):
-    if await get_role(db, uid, user.uid) != MemberRole.OWNER:
+async def delete_orginisation(
+    uid: UUID, db: DBSession, cache: CacheSession, user: CurrentUser
+):
+    if await get_role(db, cache, uid, user.uid) != MemberRole.OWNER:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, "Not a owner. Owner can only delete org"
         )
+    members: list[Record] = await db.fetch(
+        "select user_uid from memberships where org_uid=$1", uid
+    )
+    keys = []
+    for member in members:
+        keys.append(f"org:{uid}:{member['user_uid']}")
+        keys.append(f"role:{uid}:{member['user_uid']}")
+    await cache.purge(*keys)
     # TODO: orgnisation should be deleted then with a queue the orphan members
     async with db.transaction():
         await db.execute("delete from organisations where uid=$1", uid)
@@ -121,9 +139,13 @@ async def delete_orginisation(uid: UUID, db: DBSession, user: CurrentUser):
 
 @router.post("/organisations/{uid}/members", response_model=MembersResposne)
 async def create_members(
-    uid: UUID, db: DBSession, members: CreateMembersRequest, user: CurrentUser
+    uid: UUID,
+    db: DBSession,
+    cache: CacheSession,
+    members: CreateMembersRequest,
+    user: CurrentUser,
 ):
-    if await get_role(db, uid, user.uid) != MemberRole.OWNER:
+    if await get_role(db, cache, uid, user.uid) != MemberRole.OWNER:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, "Not a owner. Owner can only add members"
         )
@@ -135,8 +157,10 @@ async def create_members(
 
 
 @router.get("/organisations/{uid}/members", response_model=MembersResposne)
-async def list_members(uid: UUID, db: DBSession, user: CurrentUser):
-    if await get_role(db, uid, user.uid) is None:
+async def list_members(
+    uid: UUID, db: DBSession, cache: CacheSession, user: CurrentUser
+):
+    if await get_role(db, cache, uid, user.uid) is None:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Not a member")
     rows: list[Record] = await db.fetch(
         "select user_uid, role from memberships where org_uid=$1", uid
@@ -145,8 +169,10 @@ async def list_members(uid: UUID, db: DBSession, user: CurrentUser):
 
 
 @router.delete("/organisations/{uid}/members/{member_uid}")
-async def delete_member(uid: UUID, member_uid: UUID, db: DBSession, user: CurrentUser):
-    if await get_role(db, uid, user.uid) != MemberRole.OWNER:
+async def delete_member(
+    uid: UUID, member_uid: UUID, db: DBSession, cache: CacheSession, user: CurrentUser
+):
+    if await get_role(db, cache, uid, user.uid) != MemberRole.OWNER:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, "Not a owner. Owner can only remove members"
         )
@@ -154,6 +180,7 @@ async def delete_member(uid: UUID, member_uid: UUID, db: DBSession, user: Curren
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, "Members can't remove themselves. Ask the owner"
         )
+    await cache.purge(f"org:{uid}:{member_uid}", f"role:{uid}:{member_uid}")
     await db.execute(
         "delete from memberships where org_uid=$1 and user_uid=$2", uid, member_uid
     )
@@ -165,13 +192,15 @@ async def update_member_role(
     uid: UUID,
     member_uid: UUID,
     db: DBSession,
+    cache: CacheSession,
     user: CurrentUser,
     member: UpdateMemberRequest,
 ):
-    if await get_role(db, uid, user.uid) != MemberRole.OWNER:
+    if await get_role(db, cache, uid, user.uid) != MemberRole.OWNER:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, "Not a owner. Owner can only remove members"
         )
+    await cache.purge(f"org:{uid}:{member_uid}", f"role:{uid}:{member_uid}")
     await db.execute(
         "update memberships set role=$1, updated_at=now() where user_uid=$2 and org_uid=$3",
         member.role,

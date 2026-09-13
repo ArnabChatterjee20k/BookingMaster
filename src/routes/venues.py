@@ -6,6 +6,7 @@ from pydantic import BaseModel
 
 from ..auth.deps import CurrentUser
 from ..database.db import DBSession
+from ..cache.cache import CacheSession
 from ..database.utils import get_role
 from ..database.models import Base, Point, MemberRole
 
@@ -33,8 +34,10 @@ VENUE_COLUMNS = (
 
 
 @router.post("/venues", response_model=VenueResponse)
-async def create_venue(venue: VenueCreateRequest, db: DBSession, user: CurrentUser):
-    if await get_role(db, venue.org_uid, user.uid) != MemberRole.OWNER:
+async def create_venue(
+    venue: VenueCreateRequest, db: DBSession, cache: CacheSession, user: CurrentUser
+):
+    if await get_role(db, cache, venue.org_uid, user.uid) != MemberRole.OWNER:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, "Not a owner. Owner can only remove members"
         )

@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from ..auth.deps import CurrentUser
 from ..database.db import DBSession
+from ..cache.cache import CacheSession
 from ..database.models import Base, BookingStatus, TicketStatus
 from ..database.query import QueryBuilder
 from ..database.utils import get_role
@@ -195,7 +196,8 @@ async def _reserve_tickets(db: DBSession, ticket_tiers, ticket_tiers_limit, uid)
     return result
 
 
-async def _replinish_tickets(db: DBSession, ticket_tiers, uid):
+async def _replinish_tickets(db: DBSession, cache: CacheSession, ticket_tiers, uid):
+    await cache.purge(f"tier:{uid}")
     await db.execute(
         replinish_query, ticket_tiers, POOL_SIZE, uid, TicketStatus.AVAILABLE
     )
@@ -224,6 +226,7 @@ async def _booked_response(db: DBSession, booking_uid: UUID, amount) -> BookingR
 
 async def _rebook(
     db: DBSession,
+    cache: CacheSession,
     booking: BookingCreateRequest,
     uid: UUID,
     user,
@@ -231,6 +234,7 @@ async def _rebook(
     reserved_ids,
 ) -> BookingResponse:
     ticket_ids = [ticket_id for ids in reserved_ids.values() for ticket_id in ids]
+    await cache.purge(f"booking:{booking.booking_uid}:{user.uid}")
     await db.execute(claim_query, booking.booking_uid, TicketStatus.BOOKED, ticket_ids)
 
     total_amount = sum(
@@ -272,7 +276,11 @@ async def _rebook(
 
 @router.post("/events/{uid}/bookings", response_model=BookingResponse)
 async def create_booking(
-    uid: UUID, booking: BookingCreateRequest, db: DBSession, user: CurrentUser
+    uid: UUID,
+    booking: BookingCreateRequest,
+    db: DBSession,
+    cache: CacheSession,
+    user: CurrentUser,
 ):
     event: Record | None = await db.fetchrow(
         """select 1 from events where uid=$1 limit 1""", uid
@@ -327,7 +335,9 @@ async def create_booking(
         # HACK: generally we would want to call the payments api here after this record creation for 10mins. Then mark it as success/failed in other route after payment
         # but since no payment so directly booking it
         if not reservation_result["slot_required"]:
-            return await _rebook(db, booking, uid, user, tier_prices, reserved_ids)
+            return await _rebook(
+                db, cache, booking, uid, user, tier_prices, reserved_ids
+            )
 
         # inline reserve more for the tier
         slot_tiers = [
@@ -356,16 +366,18 @@ async def create_booking(
         result = await _reserve_tickets(db, slot_tiers, slot_tiers_limit, uid)
         reserved_ids.update(result["ticket_reserved_ids"])
         if not result["slot_required"]:
-            return await _rebook(db, booking, uid, user, tier_prices, reserved_ids)
+            return await _rebook(
+                db, cache, booking, uid, user, tier_prices, reserved_ids
+            )
 
         # not fulfilled so replinish then again reserve
-        await _replinish_tickets(db, slot_tiers, uid)
+        await _replinish_tickets(db, cache, slot_tiers, uid)
         result = await _reserve_tickets(db, slot_tiers, slot_tiers_limit, uid)
         reserved_ids.update(result["ticket_reserved_ids"])
         if result["slot_required"]:
             raise HTTPException(status.HTTP_409_CONFLICT, "Please try again later")
 
-        return await _rebook(db, booking, uid, user, tier_prices, reserved_ids)
+        return await _rebook(db, cache, booking, uid, user, tier_prices, reserved_ids)
 
 
 async def _with_tickets(db: DBSession, rows: list[Record]) -> list[BookingDetail]:
@@ -394,11 +406,18 @@ async def _with_tickets(db: DBSession, rows: list[Record]) -> list[BookingDetail
 
 
 @router.get("/bookings/{booking_uid}", response_model=BookingDetail)
-async def get_booking(booking_uid: UUID, db: DBSession, user: CurrentUser):
+async def get_booking(
+    booking_uid: UUID, db: DBSession, cache: CacheSession, user: CurrentUser
+):
+    cached_booking = await cache.get(f"booking:{booking_uid}:{user.uid}", BookingDetail)
+    if cached_booking:
+        return cached_booking
     row: Record | None = await db.fetchrow(get_booking_query, booking_uid, user.uid)
     if not row:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "booking not found")
-    return (await _with_tickets(db, [row]))[0]
+    booking = (await _with_tickets(db, [row]))[0]
+    await cache.set(f"booking:{booking_uid}:{user.uid}", booking)
+    return booking
 
 
 @router.get("/bookings", response_model=BookingListResponse)

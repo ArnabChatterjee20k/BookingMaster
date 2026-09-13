@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from ..auth.deps import CurrentUser
 from ..database.db import DBSession
+from ..cache.cache import CacheSession
 from ..database.models import Base, Point, MemberRole
 from ..database.query import QueryBuilder
 from ..database.utils import get_role
@@ -86,8 +87,10 @@ class TicketTierResponse(Base):
 
 
 @router.post("/events", response_model=EventResponse)
-async def create_event(db: DBSession, event: EventCreateRequest, user: CurrentUser):
-    if await get_role(db, event.org_uid, user.uid) != MemberRole.OWNER:
+async def create_event(
+    db: DBSession, cache: CacheSession, event: EventCreateRequest, user: CurrentUser
+):
+    if await get_role(db, cache, event.org_uid, user.uid) != MemberRole.OWNER:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, "Not a owner. Owner can only create event"
         )
@@ -206,7 +209,11 @@ async def list_events(db: DBSession, filters: Annotated[EventListRequest, Query(
 # upsert
 @router.put("/events/{uid}/tickets/tier", response_model=TicketTierResponse)
 async def create_ticket_tiers(
-    uid: UUID, ticket_tier: TicketsTierRequest, db: DBSession, user: CurrentUser
+    uid: UUID,
+    ticket_tier: TicketsTierRequest,
+    db: DBSession,
+    cache: CacheSession,
+    user: CurrentUser,
 ):
     event: Record = await db.fetchrow(
         "select org_uid, starts_at, ends_at from events where uid=$1 limit 1", uid
@@ -214,11 +221,12 @@ async def create_ticket_tiers(
     if not event:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "event not found")
 
-    if await get_role(db, event.get("org_uid"), user.uid) != MemberRole.OWNER:
+    if await get_role(db, cache, event.get("org_uid"), user.uid) != MemberRole.OWNER:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, "Not a owner. Owner can only create tickets tier"
         )
 
+    await cache.purge(f"tier:{uid}")
     async with db.transaction():
         existing: Record | None = await db.fetchrow(
             "select capacity, available from tickets_tier"
@@ -266,13 +274,18 @@ async def create_ticket_tiers(
 
 
 @router.get("/events/{uid}/tickets/tier", response_model=TicketTierResponse)
-async def get_ticket_tiers(uid: UUID, db: DBSession):
+async def get_ticket_tiers(uid: UUID, db: DBSession, cache: CacheSession):
+    cached_tier = await cache.get(f"tier:{uid}", TicketTierResponse)
+    if cached_tier:
+        return cached_tier
     tier: Record | None = await db.fetchrow(
         "select * from tickets_tier where event_uid=$1", uid
     )
     if not tier:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Event not found")
-    return TicketTierResponse(**tier)
+    response = TicketTierResponse(**tier)
+    await cache.set(f"tier:{uid}", response)
+    return response
 
 
 # not adding the delete ticket tier for now as its not going to get used a lot
