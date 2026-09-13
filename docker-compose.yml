@@ -18,6 +18,12 @@ services:
       timeout: 5s
       retries: 10
 
+  redis:
+    image: redis:7-alpine
+    restart: always
+    ports:
+      - 6379:6379
+
   # appwrite-embedding:
   #   image: appwrite/embedding:0.1.0
   #   environment:
