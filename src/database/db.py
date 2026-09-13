@@ -9,7 +9,7 @@ async def get_db():
     return conn
 
 
-async def create_pool() -> asyncpg.Pool:
+async def create_db_pool() -> asyncpg.Pool:
     return await asyncpg.create_pool(
         Config.db_uri,
         min_size=Config.db_pool_min,
@@ -19,7 +19,7 @@ async def create_pool() -> asyncpg.Pool:
 
 
 async def get_db_session(request: Request):
-    async with request.app.state.pool.acquire() as conn:
+    async with request.state.db_pool.acquire() as conn:
         yield conn
 
 
@@ -28,6 +28,13 @@ DBSession = Annotated[asyncpg.Connection, Depends(get_db_session)]
 
 async def load_schemas():
     conn = await get_db()
+    try:
+        await _create_schemas(conn)
+    finally:
+        await conn.close()
+
+
+async def _create_schemas(conn: asyncpg.Connection):
     # postgis extension
     await conn.execute("create extension if not exists postgis")
 
@@ -191,5 +198,3 @@ async def load_schemas():
         "create index if not exists tickets_booking_uid_idx"
         " on tickets(booking_uid) where booking_uid is not null;"
     )
-
-    await conn.close()
