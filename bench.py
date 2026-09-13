@@ -98,13 +98,17 @@ async def seed(conn, users):
            values($1, 'bench', gen_random_uuid(), gen_random_uuid(), $2,
                   now() + interval '30 days',
                   now() + interval '30 days 3 hours')""",
-        BENCH_EVENT, venue_uid,
+        BENCH_EVENT,
+        venue_uid,
     )
     for name, price, capacity in TIERS:
         await conn.execute(
             """insert into tickets_tier(uid, name, event_uid, price, capacity, available)
                values(gen_random_uuid(), $1, $2, $3::numeric, $4::int, $4::int)""",
-            name, BENCH_EVENT, price, capacity,
+            name,
+            BENCH_EVENT,
+            price,
+            capacity,
         )
     await conn.execute("analyze tickets_tier")
 
@@ -113,9 +117,7 @@ async def teardown(conn):
     for table in ("tickets", "bookings", "tickets_tier"):
         await conn.execute(f"delete from {table} where event_uid=$1", BENCH_EVENT)
     await conn.execute("delete from events where uid=$1", BENCH_EVENT)
-    await conn.execute(
-        "delete from users where email like 'bench-%@bench.local'"
-    )
+    await conn.execute("delete from users where email like 'bench-%@bench.local'")
     await conn.execute("delete from venues where name like 'bench-venue-%'")
 
 
@@ -168,10 +170,33 @@ async def run(name, client, make_request, total, concurrency, counts_db):
 
 
 def table(rows):
-    head = ("scenario", "reqs", "conc", "req/s", "p50 ms", "p95 ms", "p99 ms",
-            "err", "q/req", "qps")
-    widths = [max(len(head[0]), *(len(r["name"]) for r in rows)), 6, 5, 10, 8, 8, 8, 5, 7, 10]
-    line = "  ".join(h.rjust(w) if i else h.ljust(w) for i, (h, w) in enumerate(zip(head, widths)))
+    head = (
+        "scenario",
+        "reqs",
+        "conc",
+        "req/s",
+        "p50 ms",
+        "p95 ms",
+        "p99 ms",
+        "err",
+        "q/req",
+        "qps",
+    )
+    widths = [
+        max(len(head[0]), *(len(r["name"]) for r in rows)),
+        6,
+        5,
+        10,
+        8,
+        8,
+        8,
+        5,
+        7,
+        10,
+    ]
+    line = "  ".join(
+        h.rjust(w) if i else h.ljust(w) for i, (h, w) in enumerate(zip(head, widths))
+    )
     print("\n" + line)
     print("  ".join("-" * w for w in widths))
     for r in rows:
@@ -209,6 +234,7 @@ async def main(args):
             async def get_session():
                 async with pool.acquire() as conn:
                     yield CountingConnection(conn) if counts_db else conn
+
         else:
 
             async def get_session():
@@ -231,8 +257,10 @@ async def main(args):
         for _ in range(args.requests if args.requests < 20 else 20):
             r = await client.post(
                 f"/events/{BENCH_EVENT}/bookings",
-                json={"booking_uid": str(uuid.uuid4()),
-                      "tickets": [{"tier_name": "gold", "quantity": 1}]},
+                json={
+                    "booking_uid": str(uuid.uuid4()),
+                    "tickets": [{"tier_name": "gold", "quantity": 1}],
+                },
                 cookies=auth,
             )
             if r.status_code < 400:
@@ -244,19 +272,39 @@ async def main(args):
             ("health", lambda c: c.get("/health")),
             ("GET /events", lambda c: c.get("/events", params={"limit": 10})),
             ("GET /events/{uid}", lambda c: c.get(f"/events/{BENCH_EVENT}")),
-            ("GET tickets/tier", lambda c: c.get(f"/events/{BENCH_EVENT}/tickets/tier")),
-            ("GET /bookings", lambda c: c.get("/bookings", params={"limit": 10}, cookies=auth)),
-            ("GET /bookings/{uid}", lambda c: c.get(f"/bookings/{seeded[0]}", cookies=auth)
-                if seeded else c.get("/health")),
-            ("GET event bookings", lambda c: c.get(f"/events/{BENCH_EVENT}/bookings",
-                                                   params={"limit": 10}, cookies=auth)),
+            (
+                "GET tickets/tier",
+                lambda c: c.get(f"/events/{BENCH_EVENT}/tickets/tier"),
+            ),
+            (
+                "GET /bookings",
+                lambda c: c.get("/bookings", params={"limit": 10}, cookies=auth),
+            ),
+            (
+                "GET /bookings/{uid}",
+                lambda c: (
+                    c.get(f"/bookings/{seeded[0]}", cookies=auth)
+                    if seeded
+                    else c.get("/health")
+                ),
+            ),
+            (
+                "GET event bookings",
+                lambda c: c.get(
+                    f"/events/{BENCH_EVENT}/bookings",
+                    params={"limit": 10},
+                    cookies=auth,
+                ),
+            ),
         ]
 
         def booking(c):
             return c.post(
                 f"/events/{BENCH_EVENT}/bookings",
-                json={"booking_uid": str(uuid.uuid4()),
-                      "tickets": [{"tier_name": "gold", "quantity": 1}]},
+                json={
+                    "booking_uid": str(uuid.uuid4()),
+                    "tickets": [{"tier_name": "gold", "quantity": 1}],
+                },
                 cookies=auth,
             )
 
@@ -268,20 +316,32 @@ async def main(args):
         if args.only in (None, "write"):
             chosen += write_scenarios
 
-        mode = args.url or (f"in-process, pool={args.pool}" if args.pool
-                            else "in-process, connect-per-request")
-        print(f"\n  {mode}   {args.requests} requests/scenario, concurrency {args.concurrency}")
+        mode = args.url or (
+            f"in-process, pool={args.pool}"
+            if args.pool
+            else "in-process, connect-per-request"
+        )
+        print(
+            f"\n  {mode}   {args.requests} requests/scenario, concurrency {args.concurrency}"
+        )
 
         rows = []
         for name, make in chosen:
-            rows.append(await run(name, client, make, args.requests,
-                                  args.concurrency, counts_db))
+            rows.append(
+                await run(
+                    name, client, make, args.requests, args.concurrency, counts_db
+                )
+            )
         table(rows)
 
         if counts_db:
-            print("\n  q/req is queries per request -- flat as --requests grows means no N+1.")
+            print(
+                "\n  q/req is queries per request -- flat as --requests grows means no N+1."
+            )
         if any(r["err"] for r in rows):
-            print("  err counts 4xx and 5xx; POST bookings 409s when the tier is contended.")
+            print(
+                "  err counts 4xx and 5xx; POST bookings 409s when the tier is contended."
+            )
 
     if pool:
         await pool.close()
@@ -294,13 +354,28 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    p.add_argument("--requests", "-n", type=int, default=200,
-                   help="requests per scenario (default 200)")
-    p.add_argument("--concurrency", "-c", type=int, default=16,
-                   help="in-flight requests (default 16)")
-    p.add_argument("--pool", type=int, default=20,
-                   help="pool size; 0 reproduces today's connect-per-request")
-    p.add_argument("--only", choices=("read", "write"),
-                   help="restrict to read or write scenarios")
+    p.add_argument(
+        "--requests",
+        "-n",
+        type=int,
+        default=200,
+        help="requests per scenario (default 200)",
+    )
+    p.add_argument(
+        "--concurrency",
+        "-c",
+        type=int,
+        default=16,
+        help="in-flight requests (default 16)",
+    )
+    p.add_argument(
+        "--pool",
+        type=int,
+        default=20,
+        help="pool size; 0 reproduces today's connect-per-request",
+    )
+    p.add_argument(
+        "--only", choices=("read", "write"), help="restrict to read or write scenarios"
+    )
     p.add_argument("--url", help="benchmark a running server instead of in-process")
     raise SystemExit(asyncio.run(main(p.parse_args())))
