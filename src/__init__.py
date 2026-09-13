@@ -1,8 +1,9 @@
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 
 from fastapi import FastAPI
 
-from .database.db import create_pool, load_schemas
+from .database.db import create_db_pool, load_schemas
+from .cache.cache import create_cache_client
 from .database.errors import install_error_handlers
 from .routes.users import router as users_router
 from .routes.organisations import router as orginisations_router
@@ -14,12 +15,13 @@ from .routes.bookings import router as bookings_router
 def create_api():
     @asynccontextmanager
     async def lifecycle(app):
-        await load_schemas()
-        app.state.pool = await create_pool()
-        try:
-            yield
-        finally:
-            await app.state.pool.close()
+        async with AsyncExitStack() as stack:
+            await load_schemas()
+            db_pool = await create_db_pool()
+            stack.push_async_callback(db_pool.close)
+            cache = create_cache_client()
+            stack.push_async_callback(cache.aclose)
+            yield {"db_pool": db_pool, "cache": cache}
 
     app = FastAPI(lifespan=lifecycle)
     install_error_handlers(app)
